@@ -93,6 +93,151 @@ pub fn float(comptime T: type) Gen(T) {
     };
 }
 
+// ── Slice and string generators ──────────────────────────────────────
+
+/// Generator for a single printable ASCII character (32–126).
+pub fn asciiChar() Gen(u8) {
+    return intRange(u8, 32, 126);
+}
+
+/// Generator for a single alphanumeric character [a-zA-Z0-9].
+pub fn alphanumeric() Gen(u8) {
+    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    return element(u8, charset);
+}
+
+/// Generator for slices of T with length in [0, max_len].
+pub fn slice(comptime T: type, comptime inner: Gen(T), comptime max_len: usize) Gen([]const T) {
+    return sliceRange(T, inner, 0, max_len);
+}
+
+/// Generator for slices of T with length in [min_len, max_len].
+pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: usize, comptime max_len: usize) Gen([]const T) {
+    comptime {
+        if (min_len > max_len) @compileError("sliceRange(): min_len must be <= max_len");
+    }
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+                const len = rng.intRangeAtMost(usize, min_len, max_len);
+                const result = allocator.alloc(T, len) catch return &.{};
+                for (result) |*slot| {
+                    slot.* = inner.generate(rng, allocator);
+                }
+                return result;
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
+                if (value.len <= min_len) return ShrinkIter([]const T).empty();
+
+                const State = struct {
+                    original: []const T,
+                    alloc: std.mem.Allocator,
+                    shrinking_elements: bool,
+                    // Shorter-prefix phase: next length to try
+                    next_len: usize,
+                    // Element-shrink phase: position and current element's shrinker
+                    elem_idx: usize,
+                    elem_shrinker: ShrinkIter(T),
+
+                    fn nextImpl(self: *@This()) ?[]const T {
+                        if (!self.shrinking_elements) {
+                            if (self.tryShorter()) |result| return result;
+                            // Transition to element shrinking
+                            self.shrinking_elements = true;
+                            self.elem_idx = 0;
+                            self.startElementShrinker();
+                        }
+                        return self.tryShrinkElement();
+                    }
+
+                    /// Yield the next shorter prefix, or null when exhausted.
+                    fn tryShorter(self: *@This()) ?[]const T {
+                        while (self.next_len < self.original.len) {
+                            const len = self.next_len;
+                            self.next_len += 1;
+                            return self.copyPrefix(len);
+                        }
+                        return null;
+                    }
+
+                    /// Try shrinking the current element, advancing to the next when exhausted.
+                    fn tryShrinkElement(self: *@This()) ?[]const T {
+                        while (self.elem_idx < self.original.len) {
+                            if (self.elem_shrinker.next()) |shrunk_val| {
+                                return self.copyWithElement(self.elem_idx, shrunk_val);
+                            }
+                            self.elem_idx += 1;
+                            self.startElementShrinker();
+                        }
+                        return null;
+                    }
+
+                    fn copyPrefix(self: *@This(), len: usize) ?[]const T {
+                        const result = self.alloc.alloc(T, len) catch return null;
+                        if (len > 0) @memcpy(result, self.original[0..len]);
+                        return result;
+                    }
+
+                    fn copyWithElement(self: *@This(), idx: usize, val: T) ?[]const T {
+                        const result = self.alloc.alloc(T, self.original.len) catch return null;
+                        @memcpy(result, self.original);
+                        result[idx] = val;
+                        return result;
+                    }
+
+                    fn startElementShrinker(self: *@This()) void {
+                        if (self.elem_idx < self.original.len) {
+                            self.elem_shrinker = inner.shrink(self.original[self.elem_idx], self.alloc);
+                        }
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?[]const T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.nextImpl();
+                    }
+                };
+
+                const state = allocator.create(State) catch return ShrinkIter([]const T).empty();
+                state.* = .{
+                    .original = value,
+                    .alloc = allocator,
+                    .shrinking_elements = false,
+                    .next_len = min_len,
+                    .elem_idx = 0,
+                    .elem_shrinker = ShrinkIter(T).empty(),
+                };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.typeErasedNext,
+                };
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Generator for ASCII strings (printable characters, 32–126) up to max_len.
+pub fn asciiString(comptime max_len: usize) Gen([]const u8) {
+    return slice(u8, asciiChar(), max_len);
+}
+
+/// Generator for ASCII strings with length in [min_len, max_len].
+pub fn asciiStringRange(comptime min_len: usize, comptime max_len: usize) Gen([]const u8) {
+    return sliceRange(u8, asciiChar(), min_len, max_len);
+}
+
+/// Generator for alphanumeric strings [a-zA-Z0-9] up to max_len.
+pub fn alphanumericString(comptime max_len: usize) Gen([]const u8) {
+    return slice(u8, alphanumeric(), max_len);
+}
+
+/// Generator for raw byte strings (any u8 value) up to max_len.
+pub fn string(comptime max_len: usize) Gen([]const u8) {
+    return slice(u8, int(u8), max_len);
+}
+
 // ── Combinators ──────────────────────────────────────────────────────
 
 /// Always produces the same value. Shrinks to nothing.
@@ -711,4 +856,112 @@ test "filter: shrinks skip values failing predicate" {
     while (si.next()) |candidate| {
         try std.testing.expect(@mod(candidate, 2) == 0);
     }
+}
+
+// ── Slice and string tests ───────────────────────────────────────────
+
+test "asciiChar: produces printable ASCII" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = asciiChar();
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        try std.testing.expect(v >= 32 and v <= 126);
+    }
+}
+
+test "alphanumeric: produces only alphanumeric chars" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = alphanumeric();
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        const is_alnum = (v >= 'a' and v <= 'z') or (v >= 'A' and v <= 'Z') or (v >= '0' and v <= '9');
+        try std.testing.expect(is_alnum);
+    }
+}
+
+test "slice: generates slices within length bounds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = slice(u8, int(u8), 10);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(v.len <= 10);
+    }
+}
+
+test "sliceRange: respects min and max length" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = sliceRange(u8, int(u8), 3, 8);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(v.len >= 3 and v.len <= 8);
+    }
+}
+
+test "asciiString: generates valid ASCII strings" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = asciiString(20);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(v.len <= 20);
+        for (v) |c| {
+            try std.testing.expect(c >= 32 and c <= 126);
+        }
+    }
+}
+
+test "slice shrink: first candidate is empty" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = slice(u8, int(u8), 10);
+    const original = &[_]u8{ 5, 10, 15 };
+    var si = g.shrink(original, arena_state.allocator());
+    const first = si.next().?;
+    try std.testing.expectEqual(@as(usize, 0), first.len);
+}
+
+test "slice shrink: tries shorter then element-wise" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = slice(u8, int(u8), 10);
+    const original = &[_]u8{ 100, 200 };
+    var si = g.shrink(original, arena_state.allocator());
+
+    // Phase 0: shorter prefixes — empty, then length 1
+    const empty = si.next().?;
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    const len1 = si.next().?;
+    try std.testing.expectEqual(@as(usize, 1), len1.len);
+    try std.testing.expectEqual(@as(u8, 100), len1[0]);
+
+    // Phase 1: shrink elements — first element shrunk (int shrink: 100 → 0)
+    const shrunk_elem = si.next().?;
+    try std.testing.expectEqual(@as(usize, 2), shrunk_elem.len);
+    try std.testing.expectEqual(@as(u8, 0), shrunk_elem[0]); // 100 shrunk to 0
+    try std.testing.expectEqual(@as(u8, 200), shrunk_elem[1]); // unchanged
+}
+
+test "slice shrink: respects min_len" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = sliceRange(u8, int(u8), 2, 10);
+    const original = &[_]u8{ 5, 10, 15 };
+    var si = g.shrink(original, arena_state.allocator());
+    // First candidate should be length 2 (min_len), not empty
+    const first = si.next().?;
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+}
+
+test "slice shrink: empty slice has no shrinks" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = slice(u8, int(u8), 10);
+    const original: []const u8 = &.{};
+    var si = g.shrink(original, arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
 }

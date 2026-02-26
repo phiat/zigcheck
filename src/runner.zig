@@ -222,6 +222,31 @@ test "check: shrinks n > 5 to 6" {
     }
 }
 
+test "check: shrinks slice to minimal length" {
+    // Use page_allocator for generation since generated slices are not freed
+    // by the caller (the runner doesn't own the generated values' memory).
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const result = check(
+        .{ .seed = 42, .num_tests = 200, .allocator = arena.allocator() },
+        []const u8,
+        generators.slice(u8, generators.int(u8), 20),
+        struct {
+            fn prop(s: []const u8) !void {
+                // Fails for any slice with length >= 3
+                if (s.len >= 3) return error.PropertyFalsified;
+            }
+        }.prop,
+    );
+    switch (result) {
+        .passed => return error.TestUnexpectedResult,
+        .failed => |f| {
+            // Should shrink to length exactly 3 (minimal failing length)
+            try std.testing.expectEqual(@as(usize, 3), f.shrunk.len);
+        },
+    }
+}
+
 test "check: deterministic with same seed" {
     const prop = struct {
         fn f(n: i32) !void {

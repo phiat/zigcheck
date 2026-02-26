@@ -30,6 +30,19 @@ pub const auto = generators.auto;
 
 // ── Combinators ──────────────────────────────────────────────────────
 
+// ── Slice and string generators ──────────────────────────────────────
+
+pub const slice = generators.slice;
+pub const sliceRange = generators.sliceRange;
+pub const asciiChar = generators.asciiChar;
+pub const asciiString = generators.asciiString;
+pub const asciiStringRange = generators.asciiStringRange;
+pub const alphanumeric = generators.alphanumeric;
+pub const alphanumericString = generators.alphanumericString;
+pub const string = generators.string;
+
+// ── Combinators ──────────────────────────────────────────────────────
+
 pub const constant = generators.constant;
 pub const element = generators.element;
 pub const oneOf = generators.oneOf;

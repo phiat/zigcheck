@@ -62,9 +62,39 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 | Generator | Type | Description |
 |---|---|---|
 | `generators.int(T)` | `Gen(T)` | Full-range integer |
+| `generators.intRange(T, min, max)` | `Gen(T)` | Integer in `[min, max]` |
 | `generators.float(T)` | `Gen(T)` | Float in `[0, 1)` |
 | `generators.boolean()` | `Gen(bool)` | `true` or `false` |
 | `generators.byte()` | `Gen(u8)` | Single byte (alias for `int(u8)`) |
+
+### Slices and strings
+
+| Generator | Type | Description |
+|---|---|---|
+| `slice(T, gen, max_len)` | `Gen([]const T)` | Slice of `T` with length in `[0, max_len]` |
+| `sliceRange(T, gen, min, max)` | `Gen([]const T)` | Slice with length in `[min, max]` |
+| `asciiChar()` | `Gen(u8)` | Printable ASCII (32–126) |
+| `asciiString(max_len)` | `Gen([]const u8)` | ASCII string up to `max_len` |
+| `asciiStringRange(min, max)` | `Gen([]const u8)` | ASCII string with length in `[min, max]` |
+| `alphanumeric()` | `Gen(u8)` | `[a-zA-Z0-9]` |
+| `alphanumericString(max_len)` | `Gen([]const u8)` | Alphanumeric string |
+| `string(max_len)` | `Gen([]const u8)` | Raw bytes (any u8) |
+
+Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. Use `config.allocator` to provide a non-leak-detecting allocator when testing with slice/string generators:
+
+```zig
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+defer arena.deinit();
+
+try zcheck.forAllWith(.{
+    .allocator = arena.allocator(),
+}, []const u8, zcheck.asciiString(50), struct {
+    fn prop(s: []const u8) !void {
+        // test your parser, serializer, etc.
+        _ = s;
+    }
+}.prop);
+```
 
 ### Derived types
 
@@ -108,8 +138,9 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | Integer | Binary search toward zero; try sign flip for negatives |
 | Bool | `true` shrinks to `false` |
 | Float | Yield `0.0`, then halve toward zero |
-| Enum | Yield variants with lower ordinal index |
+| Enum | Yield variants with lower declaration index |
 | Struct | Shrink each field independently |
+| Slice | Shorter prefixes first, then shrink individual elements |
 | `element` | Shrink toward earlier elements in the list |
 | `filter` | Inner shrinker, filtered by predicate |
 
