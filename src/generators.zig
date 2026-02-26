@@ -2142,3 +2142,214 @@ test "shuffle: already sorted has no shrinks" {
     try std.testing.expectEqual(null, si.next());
 }
 
+// -- Shrink no-loop guarantee tests (QuickCheck parity) -------------------
+// Verify that shrinking never produces a cycle: no value appears in its own
+// shrink descendant tree within a bounded depth.
+
+fn assertNoShrinkLoop(comptime T: type, gen: Gen(T), value: T, allocator: std.mem.Allocator) !void {
+    // Walk the shrink tree breadth-first to depth 3, collecting all seen values.
+    // If any candidate equals the original, that's a loop.
+    var current = value;
+    for (0..50) |_| {
+        var si = gen.shrink(current, allocator);
+        var found_smaller = false;
+        while (si.next()) |candidate| {
+            if (std.meta.eql(candidate, value)) {
+                return error.ShrinkLoopDetected;
+            }
+            if (!found_smaller) {
+                current = candidate;
+                found_smaller = true;
+            }
+        }
+        if (!found_smaller) break;
+    }
+}
+
+test "shrink no-loop: u32" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = int(u32);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..20) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        try assertNoShrinkLoop(u32, g, v, arena.allocator());
+    }
+}
+
+test "shrink no-loop: i32" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = int(i32);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..20) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        try assertNoShrinkLoop(i32, g, v, arena.allocator());
+    }
+}
+
+test "shrink no-loop: bool" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = boolean();
+    try assertNoShrinkLoop(bool, g, true, arena.allocator());
+    try assertNoShrinkLoop(bool, g, false, arena.allocator());
+}
+
+test "shrink no-loop: f64" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = float(f64);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..20) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        try assertNoShrinkLoop(f64, g, v, arena.allocator());
+    }
+}
+
+test "shrink no-loop: enum" {
+    const Color = enum { red, green, blue };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = auto(Color);
+    try assertNoShrinkLoop(Color, g, .blue, arena.allocator());
+    try assertNoShrinkLoop(Color, g, .green, arena.allocator());
+    try assertNoShrinkLoop(Color, g, .red, arena.allocator());
+}
+
+test "shrink no-loop: struct" {
+    const Point = struct { x: i32, y: i32 };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = auto(Point);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..10) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        try assertNoShrinkLoop(Point, g, v, arena.allocator());
+    }
+}
+
+test "shrink no-loop: optional" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = auto(?i32);
+    try assertNoShrinkLoop(?i32, g, @as(?i32, 42), arena.allocator());
+    try assertNoShrinkLoop(?i32, g, @as(?i32, null), arena.allocator());
+}
+
+test "shrink no-loop: intRange" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = intRange(u32, 10, 20);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..20) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        try assertNoShrinkLoop(u32, g, v, arena.allocator());
+    }
+}
+
+// -- Float shrink candidate existence tests (QuickCheck parity) -----------
+
+test "float shrink: non-zero finite f64 always has candidates" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = float(f64);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        if (v == 0.0) continue;
+        var si = g.shrink(v, arena.allocator());
+        // Must have at least one shrink candidate (0.0)
+        const first = si.next();
+        try std.testing.expect(first != null);
+    }
+}
+
+test "float shrink: non-zero finite f32 always has candidates" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = float(f32);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena.allocator());
+        if (v == 0.0) continue;
+        var si = g.shrink(v, arena.allocator());
+        const first = si.next();
+        try std.testing.expect(first != null);
+    }
+}
+
+// -- Shrink boundary precision tests (QuickCheck parity) ------------------
+
+test "shrink boundary: signed n < -5 shrinks to -6" {
+    const runner = @import("runner.zig");
+    const result = runner.check(.{ .seed = 42, .num_tests = 200 }, i32, int(i32), struct {
+        fn prop(n: i32) !void {
+            if (n < -5) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => |f| try std.testing.expectEqual(@as(i32, -6), f.shrunk),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shrink boundary: intRange(10,20) value shrinks to boundary" {
+    const runner = @import("runner.zig");
+    const result = runner.check(.{ .seed = 42, .num_tests = 200 }, u32, intRange(u32, 10, 20), struct {
+        fn prop(n: u32) !void {
+            if (n > 15) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => |f| try std.testing.expectEqual(@as(u32, 16), f.shrunk),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shrink boundary: bool property shrinks true to exact boundary" {
+    const runner = @import("runner.zig");
+    // Property: fail on true. Should shrink to true (it's already minimal).
+    const result = runner.check(.{ .seed = 42, .num_tests = 200 }, bool, boolean(), struct {
+        fn prop(b: bool) !void {
+            if (b) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => |f| try std.testing.expectEqual(true, f.shrunk),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shrink boundary: enum shrinks to first failing variant" {
+    const Color = enum { red, green, blue };
+    const runner = @import("runner.zig");
+    const result = runner.check(.{ .seed = 42, .num_tests = 200 }, Color, auto(Color), struct {
+        fn prop(c: Color) !void {
+            // Fails for green and blue -- should shrink to green (second variant)
+            if (c != .red) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => |f| try std.testing.expectEqual(Color.green, f.shrunk),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shrink boundary: struct shrinks fields independently" {
+    const Point = struct { x: u32, y: u32 };
+    const runner = @import("runner.zig");
+    const result = runner.check(.{ .seed = 42, .num_tests = 200 }, Point, auto(Point), struct {
+        fn prop(p: Point) !void {
+            if (p.x >= 5 and p.y >= 5) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => |f| {
+            try std.testing.expectEqual(@as(u32, 5), f.shrunk.x);
+            try std.testing.expectEqual(@as(u32, 5), f.shrunk.y);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+

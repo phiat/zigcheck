@@ -488,6 +488,151 @@ pub fn forAllLabeledWith(
     }
 }
 
+/// Minimum coverage requirement entry: a label name and the minimum percentage
+/// of test cases that must receive that label.
+pub const CoverageRequirement = struct {
+    label: []const u8,
+    min_pct: f64,
+};
+
+/// Run a property check with minimum coverage requirements.
+/// Similar to QuickCheck's `cover`: after all tests pass, verifies that each
+/// label meets its minimum percentage threshold.
+///
+/// ```zig
+/// try zcheck.forAllCover(.{}, i32, gen, property, classifier, &.{
+///     .{ .label = "positive", .min_pct = 40.0 },
+///     .{ .label = "negative", .min_pct = 40.0 },
+/// });
+/// ```
+pub fn forAllCover(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    classifier: *const fn (T) []const []const u8,
+    requirements: []const CoverageRequirement,
+) !void {
+    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer label_arena.deinit();
+
+    const result = checkLabeled(config, T, gen, property, classifier, label_arena.allocator());
+    switch (result) {
+        .passed => |p| {
+            // Check coverage requirements
+            for (requirements) |req| {
+                var found = false;
+                for (p.label_names, p.label_counts) |name, count| {
+                    if (std.mem.eql(u8, name, req.label)) {
+                        const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
+                        if (pct < req.min_pct) {
+                            std.log.warn(
+                                \\
+                                \\--- zcheck: INSUFFICIENT COVERAGE -----------------------
+                                \\
+                                \\  Label "{s}": {d:.1}% (required: {d:.1}%)
+                                \\  {d} of {d} tests
+                                \\
+                                \\------------------------------------------------------
+                            , .{ req.label, pct, req.min_pct, count, p.num_tests });
+                            return error.InsufficientCoverage;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    std.log.warn(
+                        \\
+                        \\--- zcheck: INSUFFICIENT COVERAGE -----------------------
+                        \\
+                        \\  Label "{s}": 0.0% (required: {d:.1}%)
+                        \\  No test cases matched this label.
+                        \\
+                        \\------------------------------------------------------
+                    , .{ req.label, req.min_pct });
+                    return error.InsufficientCoverage;
+                }
+            }
+            // Print coverage report
+            if (p.label_names.len > 0) {
+                std.log.info("zcheck: {d} tests, coverage:", .{p.num_tests});
+                for (p.label_names, p.label_counts) |name, count| {
+                    const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
+                    std.log.info("  {d:.1}% {s}", .{ pct, name });
+                }
+            }
+        },
+        .failed => |f| {
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
+            return error.PropertyFalsified;
+        },
+        .gave_up => |g| {
+            logGaveUp(g.num_tests, g.num_discarded);
+            return error.GaveUp;
+        },
+    }
+}
+
+// -- Property conjunction / disjunction -----------------------------------
+
+/// Run multiple properties on the same generated values. All must hold (conjunction).
+/// Equivalent to QuickCheck's `.&&.` operator.
+pub fn conjoin(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    comptime properties: []const *const fn (T) anyerror!void,
+) !void {
+    const result = check(config, T, gen, struct {
+        fn combined(value: T) anyerror!void {
+            inline for (properties) |prop| {
+                try prop(value);
+            }
+        }
+    }.combined);
+    switch (result) {
+        .passed => {},
+        .failed => |f| {
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
+            return error.PropertyFalsified;
+        },
+        .gave_up => |g| {
+            logGaveUp(g.num_tests, g.num_discarded);
+            return error.GaveUp;
+        },
+    }
+}
+
+/// Run multiple properties on the same generated values. At least one must hold (disjunction).
+/// Equivalent to QuickCheck's `.||.` operator.
+pub fn disjoin(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    comptime properties: []const *const fn (T) anyerror!void,
+) !void {
+    const result = check(config, T, gen, struct {
+        fn combined(value: T) anyerror!void {
+            inline for (properties) |prop| {
+                if (prop(value)) |_| return else |_| {}
+            }
+            return error.PropertyFalsified;
+        }
+    }.combined);
+    switch (result) {
+        .passed => {},
+        .failed => |f| {
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
+            return error.PropertyFalsified;
+        },
+        .gave_up => |g| {
+            logGaveUp(g.num_tests, g.num_discarded);
+            return error.GaveUp;
+        },
+    }
+}
+
 // -- Multi-argument properties --------------------------------------------
 
 pub fn CheckResult2(comptime A: type, comptime B: type) type {
@@ -1207,6 +1352,139 @@ test "check3: shrinks all three arguments" {
             try std.testing.expectEqual(@as(u32, 3), f.shrunk_a);
             try std.testing.expectEqual(@as(u32, 3), f.shrunk_b);
             try std.testing.expectEqual(@as(u32, 3), f.shrunk_c);
+        },
+        .gave_up => return error.TestUnexpectedResult,
+    }
+}
+
+// -- QuickCheck parity tests ----------------------------------------------
+
+test "bad shrinker resilience: shrink that yields original terminates" {
+    // A generator whose shrinker always yields the original value (infinite loop).
+    // The runner must terminate via max_shrinks limit.
+    const bad_gen = Gen(u32){
+        .genFn = struct {
+            fn f(rng: std.Random, _: std.mem.Allocator) u32 {
+                return rng.int(u32);
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: u32, allocator: std.mem.Allocator) ShrinkIter(u32) {
+                // Bad shrinker: always yields the same value (never converges)
+                const State = struct {
+                    val: u32,
+                    count: usize,
+                    fn next(ctx: *anyopaque) ?u32 {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        if (self.count >= 10) return null; // finite but yields original
+                        self.count += 1;
+                        return self.val;
+                    }
+                };
+                const state = allocator.create(State) catch return ShrinkIter(u32).empty();
+                state.* = .{ .val = value, .count = 0 };
+                return .{ .context = @ptrCast(state), .nextFn = State.next };
+            }
+        }.f,
+    };
+
+    // Property that always fails -- shrinking should terminate
+    const result = check(.{ .seed = 42, .num_tests = 10, .max_shrinks = 50 }, u32, bad_gen, struct {
+        fn prop(n: u32) !void {
+            if (n > 0) return error.PropertyFalsified;
+        }
+    }.prop);
+    switch (result) {
+        .failed => {}, // Good -- terminated despite bad shrinker
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "cover: passes when coverage requirements are met" {
+    try forAllCover(.{ .seed = 42, .num_tests = 200 }, i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop, struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify, &.{
+        .{ .label = "positive", .min_pct = 30.0 },
+        .{ .label = "negative", .min_pct = 30.0 },
+    });
+}
+
+test "cover: fails when coverage requirement not met" {
+    // All values are labeled "all" -- "rare" label never appears
+    const result = blk: {
+        forAllCover(.{ .seed = 42, .num_tests = 100 }, u32, generators.int(u32), struct {
+            fn prop(_: u32) !void {}
+        }.prop, struct {
+            fn classify(_: u32) []const []const u8 {
+                return &.{"all"};
+            }
+        }.classify, &.{
+            .{ .label = "rare", .min_pct = 10.0 },
+        }) catch |err| break :blk err;
+        break :blk @as(anyerror, error.TestUnexpectedResult);
+    };
+    try std.testing.expectEqual(error.InsufficientCoverage, result);
+}
+
+test "conjoin: all properties must hold" {
+    try conjoin(.{ .seed = 42 }, u32, generators.intRange(u32, 0, 100), &.{
+        &struct {
+            fn prop(n: u32) !void {
+                if (n > 100) return error.PropertyFalsified;
+            }
+        }.prop,
+        &struct {
+            fn prop(_: u32) !void {}
+        }.prop,
+    });
+}
+
+test "disjoin: at least one property must hold" {
+    try disjoin(.{ .seed = 42 }, i32, generators.int(i32), &.{
+        &struct {
+            fn prop(n: i32) !void {
+                if (n < 0) return error.PropertyFalsified; // fails for negative
+            }
+        }.prop,
+        &struct {
+            fn prop(n: i32) !void {
+                if (n >= 0) return error.PropertyFalsified; // fails for non-negative
+            }
+        }.prop,
+    });
+}
+
+test "verbose mode determinism: same results as non-verbose" {
+    // Same seed, same config except verbose flag -- must produce identical results.
+    const prop = struct {
+        fn f(n: u32) !void {
+            if (n >= 100) return error.PropertyFalsified;
+        }
+    }.f;
+
+    const r_quiet = check(.{ .seed = 99, .num_tests = 50 }, u32, generators.int(u32), prop);
+    const r_verbose = check(.{ .seed = 99, .num_tests = 50, .verbose = true }, u32, generators.int(u32), prop);
+
+    // Both should fail with the same counterexample
+    switch (r_quiet) {
+        .failed => |f1| switch (r_verbose) {
+            .failed => |f2| {
+                try std.testing.expectEqual(f1.original, f2.original);
+                try std.testing.expectEqual(f1.shrunk, f2.shrunk);
+                try std.testing.expectEqual(f1.num_tests_before_fail, f2.num_tests_before_fail);
+                try std.testing.expectEqual(f1.shrink_steps, f2.shrink_steps);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        .passed => switch (r_verbose) {
+            .passed => {},
+            else => return error.TestUnexpectedResult,
         },
         .gave_up => return error.TestUnexpectedResult,
     }

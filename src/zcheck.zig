@@ -42,6 +42,10 @@ pub const forAllLabeledWith = runner.forAllLabeledWith;
 pub const checkLabeled = runner.checkLabeled;
 pub const CheckResultLabeled = runner.CheckResultLabeled;
 pub const CoverageResult = runner.CoverageResult;
+pub const CoverageRequirement = runner.CoverageRequirement;
+pub const forAllCover = runner.forAllCover;
+pub const conjoin = runner.conjoin;
+pub const disjoin = runner.disjoin;
 
 // -- Convenience re-exports -----------------------------------------------
 
