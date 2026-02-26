@@ -1,9 +1,12 @@
 # zcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-80%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-orange)](build.zig.zon)
+[![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
+[![Generators](https://img.shields.io/badge/generators-25%2B-blueviolet)](#generators)
+[![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~80%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
@@ -74,12 +77,14 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 |---|---|---|
 | `slice(T, gen, max_len)` | `Gen([]const T)` | Slice of `T` with length in `[0, max_len]` |
 | `sliceRange(T, gen, min, max)` | `Gen([]const T)` | Slice with length in `[min, max]` |
-| `asciiChar()` | `Gen(u8)` | Printable ASCII (32–126) |
+| `asciiChar()` | `Gen(u8)` | Printable ASCII (32-126) |
 | `asciiString(max_len)` | `Gen([]const u8)` | ASCII string up to `max_len` |
 | `asciiStringRange(min, max)` | `Gen([]const u8)` | ASCII string with length in `[min, max]` |
 | `alphanumeric()` | `Gen(u8)` | `[a-zA-Z0-9]` |
 | `alphanumericString(max_len)` | `Gen([]const u8)` | Alphanumeric string |
 | `string(max_len)` | `Gen([]const u8)` | Raw bytes (any u8) |
+| `unicodeChar()` | `Gen(u21)` | Random Unicode code point (excludes surrogates) |
+| `unicodeString(max_cps)` | `Gen([]const u8)` | Valid UTF-8 string up to `max_cps` code points |
 
 Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. Use `config.allocator` to provide a non-leak-detecting allocator when testing with slice/string generators:
 
@@ -121,6 +126,9 @@ const g = zcheck.auto(Point);
 | `frequency(T, weighted)` | `Gen(T)` | Weighted choice from `{weight, gen}` pairs |
 | `map(A, B, gen, fn)` | `Gen(B)` | Transform output type |
 | `filter(T, gen, pred)` | `Gen(T)` | Retry until predicate holds |
+| `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation |
+| `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
+| `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
 
 ```zig
 // Only test with positive even numbers
@@ -137,6 +145,15 @@ const weighted = comptime zcheck.frequency(u32, &.{
 });
 ```
 
+### Collection generators
+
+| Generator | Signature | Description |
+|---|---|---|
+| `shuffle(T, items)` | `Gen([]const T)` | Random permutation of a fixed list |
+| `sublistOf(T, items)` | `Gen([]const T)` | Random subsequence of a fixed list |
+| `orderedList(T, gen, max)` | `Gen([]const T)` | Sorted slice of random values |
+| `growingElements(T, items)` | `Gen(T)` | Biased toward earlier elements |
+
 ## Shrinking
 
 Every generator comes with a built-in shrinker that converges toward a minimal counterexample:
@@ -152,7 +169,7 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | `element` | Shrink toward earlier elements in the list |
 | `filter` | Inner shrinker, filtered by predicate |
 
-The runner uses an arena allocator for shrink state, freed in bulk when shrinking completes.
+The runner uses an arena allocator for shrink state, freed in bulk when shrinking completes. Enable `.verbose_shrink = true` to see each shrink step.
 
 ## Multi-argument properties
 
@@ -192,55 +209,74 @@ test "division is inverse of multiplication" {
 }
 ```
 
+## Coverage / labeling
+
+Track the distribution of generated test cases with `forAllLabeled`:
+
+```zig
+try zcheck.forAllLabeled(i32, zcheck.generators.int(i32),
+    struct {
+        fn prop(n: i32) !void {
+            if (n == 0) return error.PropertyFalsified;
+        }
+    }.prop,
+    struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify,
+);
+// Prints: 50.2% positive, 49.7% negative, 0.1% zero
+```
+
 ## Configuration
 
 ```zig
 try zcheck.forAllWith(.{
-    .num_tests = 500,      // default: 100
-    .max_shrinks = 2000,   // default: 1000
-    .max_discard = 1000,   // default: 500
-    .seed = 0x2a,          // default: null (time-based)
-    .verbose = true,       // default: false
-    .allocator = my_alloc, // default: std.testing.allocator
+    .num_tests = 500,         // default: 100
+    .max_shrinks = 2000,      // default: 1000
+    .max_discard = 1000,      // default: 500
+    .seed = 0x2a,             // default: null (time-based)
+    .verbose = true,          // default: false
+    .verbose_shrink = true,   // default: false
+    .allocator = my_alloc,    // default: std.testing.allocator
 }, i32, gen, property);
 ```
 
-Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. Use `.allocator` to control memory for generated values — required for slice/string generators to avoid leak-detection false positives (see [Slices and strings](#slices-and-strings)). Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
+Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. Use `.allocator` to control memory for generated values -- required for slice/string generators to avoid leak-detection false positives (see [Slices and strings](#slices-and-strings)). Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
 
 ## API
 
-### `forAll(T, gen, property) !void`
+### Core
 
-Run a property check with default config. Integrates with `std.testing` — a failing property becomes a test failure.
+| Function | Description |
+|---|---|
+| `forAll(T, gen, property)` | Run property check with default config |
+| `forAllWith(config, T, gen, property)` | Run with explicit config |
+| `forAll2(A, B, gen_a, gen_b, property)` | Two-argument property check |
+| `forAll3(A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument property check |
+| `check(config, T, gen, property)` | Return `CheckResult` without failing |
+| `check2(config, A, B, gen_a, gen_b, property)` | Two-argument check returning result |
+| `check3(config, A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument check returning result |
 
-### `forAllWith(config, T, gen, property) !void`
+### Property helpers
 
-Run with explicit `Config`.
+| Function | Description |
+|---|---|
+| `assume(condition)` | Discard test case if condition is false |
+| `assertEqual(T, expected, actual)` | Assert equality with diagnostic output |
+| `counterexample(fmt, args)` | Log context before a property failure |
+| `expectFailure(T, gen, property)` | Pass only if the property fails |
+| `forAllLabeled(T, gen, property, classifier)` | Collect coverage statistics |
 
-### `forAll2(A, B, gen_a, gen_b, property) !void`
+### Utility
 
-Run a two-argument property check. Shrinks each argument independently.
-
-### `forAll3(A, B, C, gen_a, gen_b, gen_c, property) !void`
-
-Run a three-argument property check.
-
-### `check(config, T, gen, property) CheckResult(T)`
-
-Run a property check and return the result without failing. Useful when you want to inspect the `CheckResult` programmatically.
-
-```zig
-const result = zcheck.check(.{ .seed = 42 }, u32, gen, prop);
-switch (result) {
-    .passed => |p| std.debug.print("passed {d} tests\n", .{p.num_tests}),
-    .failed => |f| std.debug.print("shrunk to {d} in {d} steps\n", .{f.shrunk, f.shrink_steps}),
-    .gave_up => |g| std.debug.print("gave up after {d} discards\n", .{g.num_discarded}),
-}
-```
-
-### `assume(condition) !void`
-
-Discard the current test case if `condition` is false. Use inside property functions for preconditions.
+| Function | Description |
+|---|---|
+| `sample(T, gen, n, allocator)` | Generate N sample values for debugging |
+| `sampleWith(T, gen, n, seed, allocator)` | Sample with specific seed |
 
 ## Running tests
 

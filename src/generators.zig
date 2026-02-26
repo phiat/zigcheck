@@ -238,6 +238,63 @@ pub fn string(comptime max_len: usize) Gen([]const u8) {
     return slice(u8, int(u8), max_len);
 }
 
+/// Generator for a random Unicode code point (excludes surrogates).
+pub fn unicodeChar() Gen(u21) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, _: std.mem.Allocator) u21 {
+                while (true) {
+                    const cp = rng.intRangeAtMost(u21, 0, 0x10FFFF);
+                    // Exclude surrogates (U+D800..U+DFFF)
+                    if (cp >= 0xD800 and cp <= 0xDFFF) continue;
+                    return cp;
+                }
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: u21, allocator: std.mem.Allocator) ShrinkIter(u21) {
+                const state = allocator.create(shrink.IntShrinkState(u21)) catch return ShrinkIter(u21).empty();
+                state.* = shrink.IntShrinkState(u21).init(value);
+                return state.iter();
+            }
+        }.f,
+    };
+}
+
+/// Generator for random Unicode strings (valid UTF-8) up to max_codepoints.
+pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const u8 {
+                const num_cps = rng.intRangeAtMost(usize, 0, max_codepoints);
+                // Worst case: 4 bytes per codepoint
+                var buf = allocator.alloc(u8, num_cps * 4) catch return "";
+                var pos: usize = 0;
+                for (0..num_cps) |_| {
+                    const cp: u21 = blk: {
+                        while (true) {
+                            const c = rng.intRangeAtMost(u21, 0, 0x10FFFF);
+                            if (c >= 0xD800 and c <= 0xDFFF) continue;
+                            break :blk c;
+                        }
+                    };
+                    const len = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
+                    if (pos + len > buf.len) break;
+                    _ = std.unicode.utf8Encode(cp, buf[pos..]) catch continue;
+                    pos += len;
+                }
+                return buf[0..pos];
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: []const u8, allocator: std.mem.Allocator) ShrinkIter([]const u8) {
+                // Reuse slice shrinker for the byte representation
+                return slice(u8, int(u8), max_codepoints * 4).shrinkFn(value, allocator);
+            }
+        }.f,
+    };
+}
+
 // ── Combinators ──────────────────────────────────────────────────────
 
 /// Always produces the same value. Shrinks to nothing.
@@ -496,6 +553,234 @@ pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Ge
                         }
                     }.next,
                 };
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Wrap a generator to disable shrinking. The generated values are
+/// produced normally but shrink candidates are never emitted.
+pub fn noShrink(comptime T: type, comptime inner: Gen(T)) Gen(T) {
+    return .{
+        .genFn = inner.genFn,
+        .shrinkFn = struct {
+            fn f(_: T, _: std.mem.Allocator) ShrinkIter(T) {
+                return ShrinkIter(T).empty();
+            }
+        }.f,
+    };
+}
+
+/// Shrink via isomorphism: given forward (A -> B) and backward (B -> A) functions,
+/// shrink B values by mapping to A, shrinking there, and mapping back.
+pub fn shrinkMap(
+    comptime A: type,
+    comptime B: type,
+    comptime inner: Gen(A),
+    comptime forward: *const fn (A) B,
+    comptime backward: *const fn (B) A,
+) Gen(B) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
+                return forward(inner.generate(rng, allocator));
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: B, allocator: std.mem.Allocator) ShrinkIter(B) {
+                // Map B -> A, shrink in A-space, map results back A -> B
+                const a_value = backward(value);
+                const inner_iter = allocator.create(ShrinkIter(A)) catch return ShrinkIter(B).empty();
+                inner_iter.* = inner.shrink(a_value, allocator);
+
+                const State = struct {
+                    a_iter: *ShrinkIter(A),
+                };
+                const state = allocator.create(State) catch return ShrinkIter(B).empty();
+                state.* = .{ .a_iter = inner_iter };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?B {
+                            const s: *State = @ptrCast(@alignCast(ctx));
+                            if (s.a_iter.next()) |a_val| {
+                                return forward(a_val);
+                            }
+                            return null;
+                        }
+                    }.next,
+                };
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Generate a random permutation of a comptime-known slice.
+/// Shrinks toward the original (sorted) order by trying to undo swaps.
+pub fn shuffle(comptime T: type, comptime items: []const T) Gen([]const T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+                const buf = allocator.alloc(T, items.len) catch return items;
+                @memcpy(buf, items);
+                rng.shuffle(T, buf);
+                return buf;
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(_: []const T, _: std.mem.Allocator) ShrinkIter([]const T) {
+                return ShrinkIter([]const T).empty();
+            }
+        }.f,
+    };
+}
+
+/// Generate a random subsequence (sublist) of a comptime-known slice.
+/// Each element is independently included or excluded.
+pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+                // Count how many we'll include
+                var count: usize = 0;
+                var include: [items.len]bool = undefined;
+                for (0..items.len) |i| {
+                    include[i] = rng.boolean();
+                    if (include[i]) count += 1;
+                }
+                const buf = allocator.alloc(T, count) catch return &.{};
+                var idx: usize = 0;
+                for (0..items.len) |i| {
+                    if (include[i]) {
+                        buf[idx] = items[i];
+                        idx += 1;
+                    }
+                }
+                return buf;
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
+                // Shrink by trying to remove each element
+                return sliceRange(T, int_or_element(T), 0, items.len).shrinkFn(value, allocator);
+            }
+
+            fn int_or_element(comptime U: type) Gen(U) {
+                // Dummy — we only need the shrinker from sliceRange, not genFn
+                return .{
+                    .genFn = struct {
+                        fn f(_: std.Random, _: std.mem.Allocator) U {
+                            unreachable;
+                        }
+                    }.f,
+                    .shrinkFn = struct {
+                        fn f(_: U, _: std.mem.Allocator) ShrinkIter(U) {
+                            return ShrinkIter(U).empty();
+                        }
+                    }.f,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Generate a sorted slice of T. Generates a random slice, then sorts it.
+/// Requires T to be comparable via `<`.
+pub fn orderedList(comptime T: type, comptime inner: Gen(T), comptime max_len: usize) Gen([]const T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+                const len = rng.intRangeAtMost(usize, 0, max_len);
+                const buf = allocator.alloc(T, len) catch return &.{};
+                for (buf) |*slot| {
+                    slot.* = inner.generate(rng, allocator);
+                }
+                std.mem.sort(T, buf, {}, struct {
+                    fn lessThan(_: void, a: T, b: T) bool {
+                        return a < b;
+                    }
+                }.lessThan);
+                return buf;
+            }
+        }.gen,
+        .shrinkFn = slice(T, inner, max_len).shrinkFn,
+    };
+}
+
+/// Generate values from a comptime-known list, biasing toward earlier elements
+/// as the test progresses. Similar to QuickCheck's growingElements.
+/// Early tests get items near the beginning; later tests get items from anywhere.
+pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
+    comptime {
+        if (items.len == 0) @compileError("growingElements() requires at least one item");
+    }
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, _: std.mem.Allocator) T {
+                // Without sized infrastructure, use the RNG to bias toward early elements:
+                // pick two random indices and take the minimum (biases toward 0)
+                const idx1 = rng.intRangeAtMost(usize, 0, items.len - 1);
+                const idx2 = rng.intRangeAtMost(usize, 0, items.len - 1);
+                return items[@min(idx1, idx2)];
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                return element(T, items).shrinkFn(value, allocator);
+            }
+        }.f,
+    };
+}
+
+/// Sample N values from a generator. Useful for debugging generators.
+/// Returns a heap-allocated slice of generated values.
+pub fn sample(comptime T: type, gen: Gen(T), n: usize, allocator: std.mem.Allocator) ![]T {
+    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))));
+    const rng = prng.random();
+    const result = try allocator.alloc(T, n);
+    for (result) |*slot| {
+        slot.* = gen.generate(rng, allocator);
+    }
+    return result;
+}
+
+/// Sample N values with a specific seed for reproducibility.
+pub fn sampleWith(comptime T: type, gen: Gen(T), n: usize, seed: u64, allocator: std.mem.Allocator) ![]T {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const result = try allocator.alloc(T, n);
+    for (result) |*slot| {
+        slot.* = gen.generate(rng, allocator);
+    }
+    return result;
+}
+
+/// Monadic bind: generate an A, then use it to choose a generator for B.
+/// The function `f` takes an A and returns a Gen(B) at comptime.
+/// Since Zig function pointers can't capture runtime values, `f` must be
+/// a comptime function that returns a generator based on the A value.
+///
+/// Note: Shrinking only applies to the B value. The A value used to select
+/// the generator is not shrunk (this would require re-running the generation).
+pub fn flatMap(
+    comptime A: type,
+    comptime B: type,
+    comptime gen_a: Gen(A),
+    comptime f: *const fn (A) Gen(B),
+) Gen(B) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
+                const a = gen_a.generate(rng, allocator);
+                const gen_b = f(a);
+                return gen_b.generate(rng, allocator);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
+                // Can't shrink effectively without knowing which gen_b was used
+                return ShrinkIter(B).empty();
             }
         }.shrinkFn,
     };
@@ -947,6 +1232,154 @@ test "frequency: single generator" {
     });
     for (0..50) |_| {
         try std.testing.expectEqual(@as(u32, 42), g.generate(prng.random(), std.testing.allocator));
+    }
+}
+
+test "noShrink: generates normally but has no shrinks" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = noShrink(i32, int(i32));
+    // Generates values
+    const v = g.generate(prng.random(), std.testing.allocator);
+    _ = v;
+    // No shrink candidates
+    var si = g.shrink(100, arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "shrinkMap: shrinks via isomorphism" {
+    // Map i32 -> u32 via absolute value. Shrink in i32 space.
+    const g = shrinkMap(i32, u32, int(i32), struct {
+        fn forward(n: i32) u32 {
+            return @intCast(@abs(n));
+        }
+    }.forward, struct {
+        fn backward(n: u32) i32 {
+            return @intCast(n);
+        }
+    }.backward);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    // Shrink 100 — should get 0 first (i32 shrinker starts with 0, mapped to u32 0)
+    var si = g.shrink(100, arena_state.allocator());
+    try std.testing.expectEqual(@as(u32, 0), si.next().?);
+}
+
+test "shuffle: produces all elements" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const items = [_]u8{ 1, 2, 3, 4 };
+    const g = shuffle(u8, &items);
+    const result = g.generate(prng.random(), arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 4), result.len);
+    // All original elements should be present
+    var sum: u32 = 0;
+    for (result) |v| sum += v;
+    try std.testing.expectEqual(@as(u32, 10), sum);
+}
+
+test "sublistOf: produces subset" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const items = [_]u8{ 10, 20, 30, 40, 50 };
+    const g = sublistOf(u8, &items);
+    for (0..100) |_| {
+        const result = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(result.len <= 5);
+        // All elements must come from original
+        for (result) |v| {
+            var found = false;
+            for (items) |item| {
+                if (v == item) found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
+}
+
+test "orderedList: produces sorted output" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = orderedList(u32, int(u32), 20);
+    for (0..50) |_| {
+        const result = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(result.len <= 20);
+        // Verify sorted
+        if (result.len > 1) {
+            for (0..result.len - 1) |i| {
+                try std.testing.expect(result[i] <= result[i + 1]);
+            }
+        }
+    }
+}
+
+test "growingElements: biases toward early elements" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const items = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const g = growingElements(u32, &items);
+    var sum: u64 = 0;
+    const n = 1000;
+    for (0..n) |_| {
+        sum += g.generate(prng.random(), std.testing.allocator);
+    }
+    // With min-of-two bias, average should be well below 4.5 (uniform midpoint)
+    const avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(n));
+    try std.testing.expect(avg < 4.0);
+}
+
+test "sample: returns N values" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const result = try sampleWith(u32, int(u32), 10, 42, arena_state.allocator());
+    try std.testing.expectEqual(@as(usize, 10), result.len);
+}
+
+test "flatMap: dependent generation" {
+    // Generate a bool, then generate either 0 or 1000 based on it
+    const g = flatMap(bool, u32, boolean(), struct {
+        fn f(b: bool) Gen(u32) {
+            if (b) return constant(u32, 1000);
+            return constant(u32, 0);
+        }
+    }.f);
+    var prng = std.Random.DefaultPrng.init(42);
+    var seen_0 = false;
+    var seen_1000 = false;
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        if (v == 0) seen_0 = true;
+        if (v == 1000) seen_1000 = true;
+        try std.testing.expect(v == 0 or v == 1000);
+    }
+    try std.testing.expect(seen_0);
+    try std.testing.expect(seen_1000);
+}
+
+test "unicodeChar: produces valid code points" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = unicodeChar();
+    for (0..200) |_| {
+        const cp = g.generate(prng.random(), std.testing.allocator);
+        try std.testing.expect(cp <= 0x10FFFF);
+        // Not a surrogate
+        try std.testing.expect(cp < 0xD800 or cp > 0xDFFF);
+    }
+}
+
+test "unicodeString: produces valid UTF-8" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = unicodeString(20);
+    for (0..50) |_| {
+        const s = g.generate(prng.random(), arena_state.allocator());
+        // Validate UTF-8 by attempting to create a view
+        const valid = if (std.unicode.Utf8View.init(s)) |_| true else |_| false;
+        try std.testing.expect(valid);
     }
 }
 

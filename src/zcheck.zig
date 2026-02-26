@@ -32,14 +32,20 @@ pub const forAll3 = runner.forAll3;
 pub const forAll3With = runner.forAll3With;
 pub const forAllWith = runner.forAllWith;
 pub const assume = runner.assume;
+pub const assertEqual = runner.assertEqual;
+pub const expectFailure = runner.expectFailure;
+pub const expectFailureWith = runner.expectFailureWith;
 pub const TestDiscarded = runner.TestDiscarded;
+pub const counterexample = runner.counterexample;
+pub const forAllLabeled = runner.forAllLabeled;
+pub const forAllLabeledWith = runner.forAllLabeledWith;
+pub const LabelResult = runner.LabelResult;
+pub const CoverageResult = runner.CoverageResult;
 
 // ── Convenience re-exports ──────────────────────────────────────────────
 
 /// Auto-derive a generator for any supported type via comptime reflection.
 pub const auto = generators.auto;
-
-// ── Combinators ──────────────────────────────────────────────────────
 
 // ── Slice and string generators ──────────────────────────────────────
 
@@ -60,6 +66,23 @@ pub const oneOf = generators.oneOf;
 pub const frequency = generators.frequency;
 pub const map = generators.map;
 pub const filter = generators.filter;
+pub const noShrink = generators.noShrink;
+pub const shrinkMap = generators.shrinkMap;
+
+// ── Derived generators ──────────────────────────────────────────────
+
+pub const shuffle = generators.shuffle;
+pub const sublistOf = generators.sublistOf;
+pub const orderedList = generators.orderedList;
+pub const growingElements = generators.growingElements;
+pub const flatMap = generators.flatMap;
+pub const unicodeChar = generators.unicodeChar;
+pub const unicodeString = generators.unicodeString;
+
+// ── Utility ──────────────────────────────────────────────────────────
+
+pub const sample = generators.sample;
+pub const sampleWith = generators.sampleWith;
 
 // ── Tests (pull in all modules for `zig build test`) ────────────────────
 

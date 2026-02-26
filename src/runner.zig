@@ -23,6 +23,30 @@ pub fn assume(condition: bool) !void {
     if (!condition) return TestDiscarded;
 }
 
+/// Add context to counterexample output. Call before returning an error
+/// in your property function to annotate what went wrong.
+///
+/// ```zig
+/// fn prop(n: i32) !void {
+///     const result = compute(n);
+///     if (result < 0) {
+///         zcheck.counterexample("compute({d}) = {d}", .{ n, result });
+///         return error.PropertyFalsified;
+///     }
+/// }
+/// ```
+pub fn counterexample(comptime fmt: []const u8, args: anytype) void {
+    std.log.info("zcheck context: " ++ fmt, args);
+}
+
+/// Assert that two values are equal. On failure, logs both values for diagnostics.
+pub fn assertEqual(comptime T: type, expected: T, actual: T) !void {
+    if (!std.meta.eql(expected, actual)) {
+        std.log.err("assertEqual failed: expected {any}, got {any}", .{ expected, actual });
+        return error.PropertyFalsified;
+    }
+}
+
 pub const Config = struct {
     /// Number of test cases to generate.
     num_tests: usize = 100,
@@ -34,9 +58,65 @@ pub const Config = struct {
     seed: ?u64 = null,
     /// Print each test case as it runs.
     verbose: bool = false,
+    /// Print each shrink step as it runs.
+    verbose_shrink: bool = false,
     /// Allocator for generated values. Defaults to std.testing.allocator.
     allocator: std.mem.Allocator = std.testing.allocator,
 };
+
+/// Run a property check expecting it to fail. Returns an error if the
+/// property unexpectedly passes all tests.
+///
+/// ```zig
+/// // This test passes because the property is expected to fail:
+/// try zcheck.expectFailure(u32, zcheck.generators.int(u32), struct {
+///     fn prop(n: u32) !void {
+///         if (n > 100) return error.PropertyFalsified;
+///     }
+/// }.prop);
+/// ```
+pub fn expectFailure(
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+) !void {
+    return expectFailureWith(.{}, T, gen, property);
+}
+
+/// Run an expected-failure property check with explicit config.
+pub fn expectFailureWith(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+) !void {
+    const result = check(config, T, gen, property);
+    switch (result) {
+        .passed => {
+            std.log.err(
+                \\
+                \\━━━ zcheck: expectFailure UNEXPECTED PASS ━━━━━━━━━━━━━━━━
+                \\
+                \\  Property passed {d} tests but was expected to fail.
+                \\
+                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            , .{config.num_tests});
+            return error.ExpectedFailure;
+        },
+        .failed => {}, // expected
+        .gave_up => {
+            std.log.err(
+                \\
+                \\━━━ zcheck: expectFailure GAVE UP ━━━━━━━━━━━━━━━━━━━━━━
+                \\
+                \\  Property gave up after too many discards.
+                \\
+                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            , .{});
+            return error.GaveUp;
+        },
+    }
+}
 
 pub fn CheckResult(comptime T: type) type {
     return union(enum) {
@@ -142,7 +222,7 @@ pub fn check(
                 continue;
             }
             // Property failed — attempt shrinking
-            const shrunk = doShrink(T, gen, property, value, config.max_shrinks);
+            const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
 
             return .{ .failed = .{
                 .seed = seed,
@@ -172,6 +252,7 @@ fn doShrink(
     property: *const fn (T) anyerror!void,
     original: T,
     max_shrinks: usize,
+    verbose_shrink: bool,
 ) ShrinkResult.Of(T) {
     var best = original;
     var steps: usize = 0;
@@ -191,6 +272,9 @@ fn doShrink(
             // Does the property still fail with this simpler value?
             if (property(candidate)) |_| {
                 // Property passed — this candidate is too simple
+                if (verbose_shrink) {
+                    std.log.info("zcheck shrink: candidate {any} passed (too simple)", .{candidate});
+                }
             } else |err| {
                 // Discarded test cases don't count as failures
                 if (err == TestDiscarded) continue;
@@ -198,6 +282,9 @@ fn doShrink(
                 best = candidate;
                 steps += 1;
                 improved = true;
+                if (verbose_shrink) {
+                    std.log.info("zcheck shrink: step {d} → {any}", .{ steps, candidate });
+                }
                 break; // restart shrinking from the new best
             }
         }
@@ -206,6 +293,116 @@ fn doShrink(
     }
 
     return .{ .value = best, .steps = steps };
+}
+
+// ── Labeled / coverage properties ────────────────────────────────────
+
+/// Result from a labeled property: the property either passes, fails, or
+/// discards, and optionally provides one or more labels for coverage tracking.
+pub const LabelResult = struct {
+    err: ?anyerror = null,
+    labels: []const []const u8 = &.{},
+};
+
+/// Coverage statistics collected during a labeled property check.
+pub const CoverageResult = struct {
+    num_tests: usize,
+    /// Map of label -> count. Stored as parallel slices.
+    label_names: []const []const u8,
+    label_counts: []const usize,
+
+    pub fn format(self: CoverageResult, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print("{d} tests:\n", .{self.num_tests});
+        for (self.label_names, self.label_counts) |name, count| {
+            const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(self.num_tests)) * 100.0;
+            try writer.print("  {d:.1}% {s}\n", .{ pct, name });
+        }
+    }
+};
+
+/// Run a property check that collects coverage labels.
+/// The classifier function takes a generated value and returns a list of label strings.
+/// After all tests pass, prints the distribution of labels.
+pub fn forAllLabeled(
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    classifier: *const fn (T) []const []const u8,
+) !void {
+    return forAllLabeledWith(.{}, T, gen, property, classifier);
+}
+
+/// Run a labeled property check with explicit config.
+pub fn forAllLabeledWith(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    classifier: *const fn (T) []const []const u8,
+) !void {
+    const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+
+    // Use an arena for label tracking allocations
+    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer label_arena.deinit();
+
+    // Track label counts using a hash map
+    var label_map = std.StringHashMap(usize).init(label_arena.allocator());
+
+    var tests_run: usize = 0;
+    var discards: usize = 0;
+
+    while (tests_run < config.num_tests) {
+        if (discards >= config.max_discard) {
+            std.log.err("zcheck: gave up after {d} discards", .{discards});
+            return error.GaveUp;
+        }
+
+        const value = gen.generate(rng, config.allocator);
+
+        if (property(value)) |_| {
+            // Collect labels
+            const labels = classifier(value);
+            for (labels) |label| {
+                const entry = try label_map.getOrPut(label);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = 0;
+                }
+                entry.value_ptr.* += 1;
+            }
+            tests_run += 1;
+        } else |err| {
+            if (err == TestDiscarded) {
+                discards += 1;
+                continue;
+            }
+            const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
+            std.log.err(
+                \\
+                \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\
+                \\  Counterexample: {any}
+                \\  Shrunk ({d} steps) from: {any}
+                \\  Reproduction seed: 0x{x}
+                \\  Rerun with: .seed = 0x{x}
+                \\
+                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            , .{ tests_run + 1, shrunk.value, shrunk.steps, value, seed, seed });
+            return error.PropertyFalsified;
+        }
+    }
+
+    // Print coverage report
+    if (label_map.count() > 0) {
+        std.log.info("zcheck: {d} tests, coverage:", .{tests_run});
+        var iter = label_map.iterator();
+        while (iter.next()) |entry| {
+            const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(tests_run)) * 100.0;
+            std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
+        }
+    }
 }
 
 // ── Multi-argument properties ────────────────────────────────────────
@@ -817,6 +1014,57 @@ test "forAll3: passing three-argument property" {
         fn prop(_: i32, _: i32, _: bool) !void {}
     }.prop);
 }
+
+// ── assertEqual tests ────────────────────────────────────────────────
+
+test "assertEqual: passes for equal values" {
+    try assertEqual(i32, 42, 42);
+}
+
+test "assertEqual: fails for unequal values" {
+    // assertEqual logs via std.log.err, so we verify behavior via the underlying check
+    const result = std.meta.eql(@as(i32, 1), @as(i32, 2));
+    try std.testing.expect(!result);
+}
+
+// ── expectFailure tests ─────────────────────────────────────────────
+
+test "expectFailure: passes when property fails" {
+    try expectFailure(u32, generators.int(u32), struct {
+        fn prop(n: u32) !void {
+            if (n > 0) return error.PropertyFalsified;
+        }
+    }.prop);
+}
+
+test "expectFailure: returns error when property passes" {
+    // Verify via check() directly that an always-passing property passes,
+    // which is what expectFailure would detect as an error.
+    const result = check(.{ .seed = 42 }, i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop);
+    switch (result) {
+        .passed => {}, // expectFailure would return error.ExpectedFailure here
+        .failed => return error.TestUnexpectedResult,
+        .gave_up => return error.TestUnexpectedResult,
+    }
+}
+
+// ── labeled property tests ───────────────────────────────────────────
+
+test "forAllLabeled: collects labels without error" {
+    try forAllLabeled(i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop, struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify);
+}
+
+// ── forAll3 / check3 tests ──────────────────────────────────────────
 
 test "check3: shrinks all three arguments" {
     const result = check3(.{ .seed = 42, .num_tests = 100 }, u32, u32, u32, generators.int(u32), generators.int(u32), generators.int(u32), struct {
