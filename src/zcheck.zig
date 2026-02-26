@@ -44,6 +44,8 @@ pub const CheckResultLabeled = runner.CheckResultLabeled;
 pub const CoverageResult = runner.CoverageResult;
 pub const CoverageRequirement = runner.CoverageRequirement;
 pub const forAllCover = runner.forAllCover;
+pub const forAllCollect = runner.forAllCollect;
+pub const forAllTabulate = runner.forAllTabulate;
 pub const conjoin = runner.conjoin;
 pub const disjoin = runner.disjoin;
 
@@ -89,6 +91,13 @@ pub const unicodeString = generators.unicodeString;
 
 pub const sample = generators.sample;
 pub const sampleWith = generators.sampleWith;
+
+// -- Constrained integer generators ---------------------------------------
+
+pub const positive = generators.positive;
+pub const nonNegative = generators.nonNegative;
+pub const nonZero = generators.nonZero;
+pub const negative = generators.negative;
 
 // -- Tests (pull in all modules for `zig build test`) ---------------------
 

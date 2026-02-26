@@ -32,11 +32,12 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
     }
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
-                const len = rng.intRangeAtMost(usize, min_len, max_len);
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) []const T {
+                const scaled_max = @min(min_len + (max_len - min_len) * size / 100, max_len);
+                const len = rng.intRangeAtMost(usize, min_len, scaled_max);
                 const result = allocator.alloc(T, len) catch return &.{};
                 for (result) |*slot| {
-                    slot.* = inner.generate(rng, allocator);
+                    slot.* = inner.generate(rng, allocator, size);
                 }
                 return result;
             }
@@ -198,7 +199,7 @@ pub fn string(comptime max_len: usize) Gen([]const u8) {
 pub fn unicodeChar() Gen(u21) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, _: std.mem.Allocator) u21 {
+            fn gen(rng: std.Random, _: std.mem.Allocator, _: usize) u21 {
                 while (true) {
                     const cp = rng.intRangeAtMost(u21, 0, 0x10FFFF);
                     // Exclude surrogates (U+D800..U+DFFF)
@@ -241,7 +242,7 @@ pub fn unicodeChar() Gen(u21) {
 pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const u8 {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, _: usize) []const u8 {
                 const num_cps = rng.intRangeAtMost(usize, 0, max_codepoints);
                 // Worst case: 4 bytes per codepoint
                 var buf = allocator.alloc(u8, num_cps * 4) catch return "";
@@ -344,7 +345,7 @@ pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
 pub fn shuffle(comptime T: type, comptime items: []const T) Gen([]const T) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, _: usize) []const T {
                 const buf = allocator.alloc(T, items.len) catch return items;
                 @memcpy(buf, items);
                 rng.shuffle(T, buf);
@@ -404,7 +405,7 @@ pub fn shuffle(comptime T: type, comptime items: []const T) Gen([]const T) {
 pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, _: usize) []const T {
                 // Count how many we'll include
                 var count: usize = 0;
                 var include: [items.len]bool = undefined;
@@ -433,7 +434,7 @@ pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
                 // Dummy generator -- only the shrinker is used by sliceRange.
                 return .{
                     .genFn = struct {
-                        fn f(_: std.Random, _: std.mem.Allocator) U {
+                        fn f(_: std.Random, _: std.mem.Allocator, _: usize) U {
                             return std.mem.zeroes(U);
                         }
                     }.f,
@@ -453,11 +454,11 @@ pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
 pub fn orderedList(comptime T: type, comptime inner: Gen(T), comptime max_len: usize) Gen([]const T) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) []const T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) []const T {
                 const len = rng.intRangeAtMost(usize, 0, max_len);
                 const buf = allocator.alloc(T, len) catch return &.{};
                 for (buf) |*slot| {
-                    slot.* = inner.generate(rng, allocator);
+                    slot.* = inner.generate(rng, allocator, size);
                 }
                 std.mem.sort(T, buf, {}, struct {
                     fn lessThan(_: void, a: T, b: T) bool {
@@ -520,7 +521,7 @@ pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, _: std.mem.Allocator) T {
+            fn gen(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 // Min-of-three gives a steeper bias toward index 0.
                 const idx1 = rng.intRangeAtMost(usize, 0, items.len - 1);
                 const idx2 = rng.intRangeAtMost(usize, 0, items.len - 1);
@@ -551,7 +552,7 @@ pub fn sampleWith(comptime T: type, gen: Gen(T), n: usize, seed: u64, allocator:
     const rng = prng.random();
     const result = try allocator.alloc(T, n);
     for (result) |*slot| {
-        slot.* = gen.generate(rng, allocator);
+        slot.* = gen.generate(rng, allocator, 100);
     }
     return result;
 }
@@ -562,7 +563,7 @@ test "asciiChar: produces printable ASCII" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = asciiChar();
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(v >= 32 and v <= 126);
     }
 }
@@ -571,7 +572,7 @@ test "alphanumeric: produces only alphanumeric chars" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = alphanumeric();
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         const is_alnum = (v >= 'a' and v <= 'z') or (v >= 'A' and v <= 'Z') or (v >= '0' and v <= '9');
         try std.testing.expect(is_alnum);
     }
@@ -583,7 +584,7 @@ test "slice: generates slices within length bounds" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = slice(u8, generators.int(u8), 10);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), arena_state.allocator());
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(v.len <= 10);
     }
 }
@@ -594,7 +595,7 @@ test "sliceRange: respects min and max length" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = sliceRange(u8, generators.int(u8), 3, 8);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), arena_state.allocator());
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(v.len >= 3 and v.len <= 8);
     }
 }
@@ -605,7 +606,7 @@ test "asciiString: generates valid ASCII strings" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = asciiString(20);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), arena_state.allocator());
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(v.len <= 20);
         for (v) |c| {
             try std.testing.expect(c >= 32 and c <= 126);
@@ -678,7 +679,7 @@ test "shuffle: produces all elements" {
     var prng = std.Random.DefaultPrng.init(42);
     const items = [_]u8{ 1, 2, 3, 4 };
     const g = shuffle(u8, &items);
-    const result = g.generate(prng.random(), arena_state.allocator());
+    const result = g.generate(prng.random(), arena_state.allocator(), 100);
     try std.testing.expectEqual(@as(usize, 4), result.len);
     // All original elements should be present
     var sum: u32 = 0;
@@ -693,7 +694,7 @@ test "sublistOf: produces subset" {
     const items = [_]u8{ 10, 20, 30, 40, 50 };
     const g = sublistOf(u8, &items);
     for (0..100) |_| {
-        const result = g.generate(prng.random(), arena_state.allocator());
+        const result = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(result.len <= 5);
         // All elements must come from original
         for (result) |v| {
@@ -712,7 +713,7 @@ test "orderedList: produces sorted output" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = orderedList(u32, generators.int(u32), 20);
     for (0..50) |_| {
-        const result = g.generate(prng.random(), arena_state.allocator());
+        const result = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(result.len <= 20);
         // Verify sorted
         if (result.len > 1) {
@@ -749,7 +750,7 @@ test "growingElements: min-of-three biases toward early elements" {
     var sum: u64 = 0;
     const n = 1000;
     for (0..n) |_| {
-        sum += g.generate(prng.random(), std.testing.allocator);
+        sum += g.generate(prng.random(), std.testing.allocator, 100);
     }
     // With min-of-three bias, average should be well below 3.0 (uniform midpoint is 4.5)
     const avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(n));
@@ -767,7 +768,7 @@ test "unicodeChar: produces valid code points" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = unicodeChar();
     for (0..200) |_| {
-        const cp = g.generate(prng.random(), std.testing.allocator);
+        const cp = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(cp <= 0x10FFFF);
         // Not a surrogate
         try std.testing.expect(cp < 0xD800 or cp > 0xDFFF);
@@ -792,7 +793,7 @@ test "unicodeString: produces valid UTF-8" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = unicodeString(20);
     for (0..50) |_| {
-        const s = g.generate(prng.random(), arena_state.allocator());
+        const s = g.generate(prng.random(), arena_state.allocator(), 100);
         // Validate UTF-8 by attempting to create a view
         const valid = if (std.unicode.Utf8View.init(s)) |_| true else |_| false;
         try std.testing.expect(valid);

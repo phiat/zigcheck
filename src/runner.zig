@@ -236,7 +236,8 @@ pub fn check(
         // allocations (slices, strings) are no longer needed.
         _ = gen_arena.reset(.retain_capacity);
 
-        const value = gen.generate(rng, gen_alloc);
+        const size = if (config.num_tests > 0) tests_run * 100 / config.num_tests else 100;
+        const value = gen.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
             std.log.info("zcheck: test {d}/{d}: {any}", .{ tests_run + 1, config.num_tests, value });
@@ -406,7 +407,8 @@ pub fn checkLabeled(
             } };
         }
 
-        const value = gen.generate(rng, arena_alloc);
+        const size = if (config.num_tests > 0) tests_run * 100 / config.num_tests else 100;
+        const value = gen.generate(rng, arena_alloc, size);
 
         if (property(value)) |_| {
             const labels = classifier(value);
@@ -582,6 +584,66 @@ pub fn forAllCover(
     }
 }
 
+// -- collect / tabulate convenience wrappers ------------------------------
+
+/// Run a property check that auto-labels each test case with the string
+/// representation of the generated value. Equivalent to QuickCheck's `collect`.
+///
+/// ```zig
+/// try zcheck.forAllCollect(.{}, u8, zcheck.generators.intRange(u8, 0, 5), struct {
+///     fn prop(_: u8) !void {}
+/// }.prop);
+/// // Prints distribution: "16.0% 3", "18.0% 0", etc.
+/// ```
+pub fn forAllCollect(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+) !void {
+    return forAllLabeledWith(config, T, gen, property, struct {
+        fn classify(value: T) []const []const u8 {
+            const label = std.fmt.allocPrint(std.heap.page_allocator, "{any}", .{value}) catch return &.{};
+            return @constCast(&[_][]const u8{label})[0..1];
+        }
+    }.classify);
+}
+
+/// Run a property check that groups labels under a named table.
+/// Each generated value is classified by the classifier function,
+/// and all labels are prefixed with the table name for grouped display.
+/// Equivalent to QuickCheck's `tabulate`.
+///
+/// ```zig
+/// try zcheck.forAllTabulate(.{}, i32, gen, property, "sign", struct {
+///     fn classify(n: i32) []const []const u8 {
+///         if (n > 0) return &.{"positive"};
+///         if (n < 0) return &.{"negative"};
+///         return &.{"zero"};
+///     }
+/// }.classify);
+/// // Prints: "sign/positive: 50.2%", "sign/negative: 49.7%", etc.
+/// ```
+pub fn forAllTabulate(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    comptime table_name: []const u8,
+    comptime classifier: *const fn (T) []const []const u8,
+) !void {
+    return forAllLabeledWith(config, T, gen, property, struct {
+        fn tabulateClassifier(value: T) []const []const u8 {
+            const labels = classifier(value);
+            const prefixed = std.heap.page_allocator.alloc([]const u8, labels.len) catch return &.{};
+            for (labels, 0..) |label, i| {
+                prefixed[i] = std.fmt.allocPrint(std.heap.page_allocator, table_name ++ "/{s}", .{label}) catch label;
+            }
+            return prefixed;
+        }
+    }.tabulateClassifier);
+}
+
 // -- Property conjunction / disjunction -----------------------------------
 
 /// Run multiple properties on the same generated values. All must hold (conjunction).
@@ -724,8 +786,9 @@ pub fn check2(
             } };
         }
 
-        const a = gen_a.generate(rng, gen_alloc);
-        const b = gen_b.generate(rng, gen_alloc);
+        const size = if (config.num_tests > 0) tests_run * 100 / config.num_tests else 100;
+        const a = gen_a.generate(rng, gen_alloc, size);
+        const b = gen_b.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
             std.log.info("zcheck: test {d}/{d}: ({any}, {any})", .{ tests_run + 1, config.num_tests, a, b });
@@ -905,9 +968,10 @@ pub fn check3(
             } };
         }
 
-        const a = gen_a.generate(rng, gen_alloc);
-        const b = gen_b.generate(rng, gen_alloc);
-        const c = gen_c.generate(rng, gen_alloc);
+        const size = if (config.num_tests > 0) tests_run * 100 / config.num_tests else 100;
+        const a = gen_a.generate(rng, gen_alloc, size);
+        const b = gen_b.generate(rng, gen_alloc, size);
+        const c = gen_c.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
             std.log.info("zcheck: test {d}/{d}: ({any}, {any}, {any})", .{ tests_run + 1, config.num_tests, a, b, c });
@@ -1372,7 +1436,7 @@ test "bad shrinker resilience: shrink that yields original terminates" {
     // The runner must terminate via max_shrinks limit.
     const bad_gen = Gen(u32){
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) u32 {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) u32 {
                 return rng.int(u32);
             }
         }.f,
@@ -1438,6 +1502,25 @@ test "cover: fails when coverage requirement not met" {
         break :blk @as(anyerror, error.TestUnexpectedResult);
     };
     try std.testing.expectEqual(error.InsufficientCoverage, result);
+}
+
+test "collect: auto-labels with value string representation" {
+    // Should not error -- just prints distribution
+    try forAllCollect(.{ .seed = 42, .num_tests = 20 }, u8, generators.intRange(u8, 0, 3), struct {
+        fn prop(_: u8) !void {}
+    }.prop);
+}
+
+test "tabulate: groups labels under table name" {
+    try forAllTabulate(.{ .seed = 42, .num_tests = 50 }, i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop, "sign", struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify);
 }
 
 test "conjoin: all properties must hold" {

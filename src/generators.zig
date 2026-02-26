@@ -15,7 +15,7 @@ pub fn int(comptime T: type) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 return rng.int(T);
             }
         }.f,
@@ -37,7 +37,7 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 return rng.intRangeAtMost(T, min, max);
             }
         }.f,
@@ -114,7 +114,7 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
 pub fn boolean() Gen(bool) {
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) bool {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) bool {
                 return rng.boolean();
             }
         }.f,
@@ -143,7 +143,7 @@ pub fn float(comptime T: type) Gen(T) {
     const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 // Generate full-range finite floats via random bit patterns,
                 // re-rolling NaN and infinity to keep values finite.
                 while (true) {
@@ -160,6 +160,49 @@ pub fn float(comptime T: type) Gen(T) {
             }
         }.f,
     };
+}
+
+// -- Constrained integer generators ---------------------------------------
+
+/// Generator for strictly positive integers (> 0).
+/// For unsigned types, produces [1, maxInt]. For signed types, produces [1, maxInt].
+pub fn positive(comptime T: type) Gen(T) {
+    comptime {
+        if (@typeInfo(T) != .int) @compileError("positive() requires an integer type, got " ++ @typeName(T));
+    }
+    return intRange(T, 1, std.math.maxInt(T));
+}
+
+/// Generator for non-negative integers (>= 0).
+/// For unsigned types this is equivalent to int(T).
+/// For signed types, produces [0, maxInt].
+pub fn nonNegative(comptime T: type) Gen(T) {
+    comptime {
+        if (@typeInfo(T) != .int) @compileError("nonNegative() requires an integer type, got " ++ @typeName(T));
+    }
+    return intRange(T, 0, std.math.maxInt(T));
+}
+
+/// Generator for non-zero integers (!= 0).
+/// Produces any value in the full range except zero.
+pub fn nonZero(comptime T: type) Gen(T) {
+    comptime {
+        if (@typeInfo(T) != .int) @compileError("nonZero() requires an integer type, got " ++ @typeName(T));
+    }
+    return combinators_mod.filter(T, int(T), struct {
+        fn pred(n: T) bool {
+            return n != 0;
+        }
+    }.pred);
+}
+
+/// Generator for strictly negative integers (< 0). Signed types only.
+pub fn negative(comptime T: type) Gen(T) {
+    comptime {
+        if (@typeInfo(T) != .int) @compileError("negative() requires an integer type, got " ++ @typeName(T));
+        if (@typeInfo(T).int.signedness != .signed) @compileError("negative() requires a signed integer type, got " ++ @typeName(T));
+    }
+    return intRange(T, std.math.minInt(T), -1);
 }
 
 // -- Re-exports from sub-modules ------------------------------------------
@@ -217,7 +260,7 @@ test "int generator produces values" {
     var seen_positive = false;
     var seen_negative = false;
     for (0..100) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v > 0) seen_positive = true;
         if (v < 0) seen_negative = true;
     }
@@ -229,7 +272,7 @@ test "intRange: produces values in [10, 20]" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = intRange(u32, 10, 20);
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(v >= 10 and v <= 20);
     }
 }
@@ -294,7 +337,7 @@ test "boolean generator produces both values" {
     var seen_true = false;
     var seen_false = false;
     for (0..100) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v) seen_true = true else seen_false = true;
     }
     try std.testing.expect(seen_true);
@@ -307,7 +350,7 @@ test "float generator produces finite full-range values" {
     var seen_negative = false;
     var seen_gt_one = false;
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(std.math.isFinite(v));
         if (v < 0.0) seen_negative = true;
         if (v > 1.0) seen_gt_one = true;
@@ -332,4 +375,71 @@ test "bool shrink: true -> false" {
     var si = g.shrink(true, arena_state.allocator());
     try std.testing.expectEqual(false, si.next().?);
     try std.testing.expectEqual(null, si.next());
+}
+
+// -- Constrained integer generator tests ----------------------------------
+
+test "positive: all values > 0" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = positive(i32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v > 0);
+    }
+}
+
+test "positive: unsigned all values > 0" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = positive(u32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v > 0);
+    }
+}
+
+test "nonNegative: all values >= 0" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = nonNegative(i32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v >= 0);
+    }
+}
+
+test "nonZero: no zeros" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = nonZero(i32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v != 0);
+    }
+}
+
+test "negative: all values < 0" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = negative(i32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v < 0);
+    }
+}
+
+test "positive: shrinker stays > 0" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = positive(i32);
+    var si = g.shrink(50, arena_state.allocator());
+    while (si.next()) |v| {
+        try std.testing.expect(v > 0);
+    }
+}
+
+test "negative: shrinker stays < 0" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = negative(i32);
+    var si = g.shrink(-50, arena_state.allocator());
+    while (si.next()) |v| {
+        try std.testing.expect(v < 0);
+    }
 }

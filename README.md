@@ -1,10 +1,10 @@
 # zcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-118%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-126%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
-[![Generators](https://img.shields.io/badge/generators-25%2B-blueviolet)](#generators)
+[![Generators](https://img.shields.io/badge/generators-30%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~80%25-informational)](#api)
 
@@ -70,6 +70,10 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 | `generators.float(T)` | `Gen(T)` | Full-range finite float |
 | `generators.boolean()` | `Gen(bool)` | `true` or `false` |
 | `generators.byte()` | `Gen(u8)` | Single byte (alias for `int(u8)`) |
+| `generators.positive(T)` | `Gen(T)` | Strictly positive integer (`> 0`) |
+| `generators.nonNegative(T)` | `Gen(T)` | Non-negative integer (`>= 0`) |
+| `generators.nonZero(T)` | `Gen(T)` | Non-zero integer (`!= 0`) |
+| `generators.negative(T)` | `Gen(T)` | Strictly negative integer (`< 0`, signed only) |
 
 ### Slices and strings
 
@@ -243,6 +247,12 @@ try zcheck.forAllWith(.{
 
 Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
 
+## Size parameter
+
+Like QuickCheck, zcheck threads a `size` parameter (0–100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
+
+Slice and string generators use size to scale the maximum length — at size 0, they generate minimum-length values; at size 100, they generate up to the configured maximum. Primitive generators (int, float, bool) ignore size and use the full range.
+
 ## API
 
 ### Core
@@ -269,6 +279,8 @@ Use `.seed` for deterministic, reproducible test runs. Failed tests print their 
 | `forAllLabeledWith(config, T, gen, property, classifier)` | Labeled check with explicit config |
 | `checkLabeled(config, T, gen, property, classifier, alloc)` | Return `CheckResultLabeled` without failing |
 | `forAllCover(config, T, gen, prop, classifier, reqs)` | Labeled check with minimum coverage requirements |
+| `forAllCollect(config, T, gen, property)` | Auto-label with stringified value (QuickCheck `collect`) |
+| `forAllTabulate(config, T, gen, prop, table, classifier)` | Group labels under a named table (QuickCheck `tabulate`) |
 | `conjoin(config, T, gen, properties)` | All properties must hold (`.&&.`) |
 | `disjoin(config, T, gen, properties)` | At least one must hold (`.||.`) |
 

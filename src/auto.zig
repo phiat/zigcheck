@@ -39,7 +39,7 @@ fn enumGen(comptime T: type) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 const fields = @typeInfo(T).@"enum".fields;
                 const index = rng.intRangeAtMost(usize, 0, fields.len - 1);
                 inline for (fields, 0..) |field, i| {
@@ -104,10 +104,10 @@ fn structGen(comptime T: type) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, allocator: std.mem.Allocator) T {
+            fn f(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 var result: T = undefined;
                 inline for (@typeInfo(T).@"struct".fields) |field| {
-                    @field(result, field.name) = auto(field.type).generate(rng, allocator);
+                    @field(result, field.name) = auto(field.type).generate(rng, allocator, size);
                 }
                 return result;
             }
@@ -178,10 +178,10 @@ fn structGen(comptime T: type) Gen(T) {
 fn optionalGen(comptime Child: type) Gen(?Child) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) ?Child {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) ?Child {
                 // ~10% null
                 if (rng.intRangeAtMost(u8, 0, 9) == 0) return null;
-                return auto(Child).generate(rng, allocator);
+                return auto(Child).generate(rng, allocator, size);
             }
         }.gen,
         .shrinkFn = struct {
@@ -235,14 +235,14 @@ fn unionGen(comptime T: type) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 const idx = rng.intRangeAtMost(usize, 0, fields.len - 1);
                 inline for (fields, 0..) |field, i| {
                     if (idx == i) {
                         if (field.type == void) {
                             return @unionInit(T, field.name, {});
                         } else {
-                            return @unionInit(T, field.name, auto(field.type).generate(rng, allocator));
+                            return @unionInit(T, field.name, auto(field.type).generate(rng, allocator, size));
                         }
                     }
                 }
@@ -356,7 +356,7 @@ test "enum generator produces all variants" {
     const g = enumGen(Color);
     var seen = [_]bool{ false, false, false };
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         seen[@intFromEnum(v)] = true;
     }
     for (seen) |s| try std.testing.expect(s);
@@ -366,7 +366,7 @@ test "auto: struct generation" {
     const Point = struct { x: i32, y: i32 };
     var prng = std.Random.DefaultPrng.init(42);
     const g = auto(Point);
-    const p = g.generate(prng.random(), std.testing.allocator);
+    const p = g.generate(prng.random(), std.testing.allocator, 100);
     // Just verify it produces a valid struct
     _ = p.x;
     _ = p.y;
@@ -377,7 +377,7 @@ test "auto: nested struct generation" {
     const Outer = struct { inner: Inner, value: i64 };
     var prng = std.Random.DefaultPrng.init(42);
     const g = auto(Outer);
-    const v = g.generate(prng.random(), std.testing.allocator);
+    const v = g.generate(prng.random(), std.testing.allocator, 100);
     _ = v.inner.a;
     _ = v.value;
 }
@@ -432,7 +432,7 @@ test "auto: optional generates both null and non-null" {
     var seen_null = false;
     var seen_value = false;
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v) |_| {
             seen_value = true;
         } else {
@@ -458,7 +458,7 @@ test "auto: slice []const i32 generates values" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = auto([]const i32);
     for (0..20) |_| {
-        const v = g.generate(prng.random(), arena_state.allocator());
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
         try std.testing.expect(v.len <= 20);
     }
 }
@@ -475,7 +475,7 @@ test "auto: tagged union generates all variants" {
     var seen_value = false;
     var seen_flag = false;
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         switch (v) {
             .empty => seen_empty = true,
             .value => seen_value = true,
@@ -531,7 +531,7 @@ test "shrink no-loop: u32" {
     const g = generators.int(u32);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..20) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         try assertNoShrinkLoop(u32, g, v, arena.allocator());
     }
 }
@@ -542,7 +542,7 @@ test "shrink no-loop: i32" {
     const g = generators.int(i32);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..20) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         try assertNoShrinkLoop(i32, g, v, arena.allocator());
     }
 }
@@ -561,7 +561,7 @@ test "shrink no-loop: f64" {
     const g = generators.float(f64);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..20) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         try assertNoShrinkLoop(f64, g, v, arena.allocator());
     }
 }
@@ -583,7 +583,7 @@ test "shrink no-loop: struct" {
     const g = auto(Point);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..10) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         try assertNoShrinkLoop(Point, g, v, arena.allocator());
     }
 }
@@ -602,7 +602,7 @@ test "shrink no-loop: intRange" {
     const g = generators.intRange(u32, 10, 20);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..20) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         try assertNoShrinkLoop(u32, g, v, arena.allocator());
     }
 }
@@ -615,7 +615,7 @@ test "float shrink: non-zero finite f64 always has candidates" {
     const g = generators.float(f64);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         if (v == 0.0) continue;
         var si = g.shrink(v, arena.allocator());
         // Must have at least one shrink candidate (0.0)
@@ -630,7 +630,7 @@ test "float shrink: non-zero finite f32 always has candidates" {
     const g = generators.float(f32);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), arena.allocator());
+        const v = g.generate(prng.random(), arena.allocator(), 100);
         if (v == 0.0) continue;
         var si = g.shrink(v, arena.allocator());
         const first = si.next();

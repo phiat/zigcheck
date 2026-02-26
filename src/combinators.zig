@@ -10,7 +10,7 @@ const generators = @import("generators.zig");
 pub fn constant(comptime T: type, comptime value: T) Gen(T) {
     return .{
         .genFn = struct {
-            fn f(_: std.Random, _: std.mem.Allocator) T {
+            fn f(_: std.Random, _: std.mem.Allocator, _: usize) T {
                 return value;
             }
         }.f,
@@ -30,7 +30,7 @@ pub fn element(comptime T: type, comptime choices: []const T) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
                 const idx = rng.intRangeAtMost(usize, 0, choices.len - 1);
                 return choices[idx];
             }
@@ -88,10 +88,10 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, allocator: std.mem.Allocator) T {
+            fn f(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 const idx = rng.intRangeAtMost(usize, 0, gens.len - 1);
                 inline for (gens, 0..) |g, i| {
-                    if (idx == i) return g.generate(rng, allocator);
+                    if (idx == i) return g.generate(rng, allocator, size);
                 }
                 unreachable;
             }
@@ -145,8 +145,8 @@ pub fn map(
 ) Gen(B) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
-                return f(inner.generate(rng, allocator));
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                return f(inner.generate(rng, allocator, size));
             }
         }.gen,
         .shrinkFn = struct {
@@ -173,9 +173,9 @@ pub fn filter(
     const max_retries = 1000;
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 for (0..max_retries) |_| {
-                    const val = inner.generate(rng, allocator);
+                    const val = inner.generate(rng, allocator, size);
                     if (pred(val)) return val;
                 }
                 // Log a diagnostic rather than panicking so the test runner can
@@ -184,7 +184,7 @@ pub fn filter(
                 // Return the last generated value even though it doesn't pass the
                 // predicate. This lets the runner proceed (the property will likely
                 // fail, and the seed will be reported).
-                return inner.generate(rng, allocator);
+                return inner.generate(rng, allocator, size);
             }
         }.gen,
         .shrinkFn = struct {
@@ -222,14 +222,14 @@ pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Ge
     }
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 comptime var total: usize = 0;
                 inline for (weighted) |entry| {
                     total += entry[0];
                 }
                 var pick = rng.intRangeLessThan(usize, 0, total);
                 inline for (weighted) |entry| {
-                    if (pick < entry[0]) return entry[1].generate(rng, allocator);
+                    if (pick < entry[0]) return entry[1].generate(rng, allocator, size);
                     pick -= entry[0];
                 }
                 unreachable;
@@ -297,8 +297,8 @@ pub fn shrinkMap(
 ) Gen(B) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
-                return forward(inner.generate(rng, allocator));
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                return forward(inner.generate(rng, allocator, size));
             }
         }.gen,
         .shrinkFn = struct {
@@ -344,10 +344,10 @@ pub fn flatMap(
 ) Gen(B) {
     return .{
         .genFn = struct {
-            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
-                const a = gen_a.generate(rng, allocator);
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                const a = gen_a.generate(rng, allocator, size);
                 const gen_b = f(a);
-                return gen_b.generate(rng, allocator);
+                return gen_b.generate(rng, allocator, size);
             }
         }.gen,
         .shrinkFn = struct {
@@ -366,7 +366,7 @@ test "constant: always produces the same value" {
     var prng = std.Random.DefaultPrng.init(42);
     const g = constant(u32, 7);
     for (0..50) |_| {
-        try std.testing.expectEqual(@as(u32, 7), g.generate(prng.random(), std.testing.allocator));
+        try std.testing.expectEqual(@as(u32, 7), g.generate(prng.random(), std.testing.allocator, 100));
     }
 }
 
@@ -376,7 +376,7 @@ test "element: picks from choices" {
     const g = element(u8, &choices);
     var seen = [_]bool{ false, false, false };
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v == 10) seen[0] = true;
         if (v == 20) seen[1] = true;
         if (v == 30) seen[2] = true;
@@ -413,7 +413,7 @@ test "oneOf: picks from multiple generators" {
     });
     var seen = [_]bool{ false, false, false };
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v == 1) seen[0] = true;
         if (v == 2) seen[1] = true;
         if (v == 3) seen[2] = true;
@@ -429,7 +429,7 @@ test "map: transforms values" {
     }.f);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..50) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(v % 2 == 0); // always even
     }
 }
@@ -442,7 +442,7 @@ test "filter: only produces values satisfying predicate" {
     }.pred);
     var prng = std.Random.DefaultPrng.init(42);
     for (0..100) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         try std.testing.expect(v > 0);
     }
 }
@@ -485,7 +485,7 @@ test "frequency: respects weights" {
     var count_1: usize = 0;
     var count_2: usize = 0;
     for (0..1000) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v == 1) count_1 += 1;
         if (v == 2) count_2 += 1;
     }
@@ -501,7 +501,7 @@ test "frequency: single generator" {
         .{ 1, constant(u32, 42) },
     });
     for (0..50) |_| {
-        try std.testing.expectEqual(@as(u32, 42), g.generate(prng.random(), std.testing.allocator));
+        try std.testing.expectEqual(@as(u32, 42), g.generate(prng.random(), std.testing.allocator, 100));
     }
 }
 
@@ -511,7 +511,7 @@ test "noShrink: generates normally but has no shrinks" {
     defer arena_state.deinit();
     const g = noShrink(i32, generators.int(i32));
     // Generates values
-    const v = g.generate(prng.random(), std.testing.allocator);
+    const v = g.generate(prng.random(), std.testing.allocator, 100);
     _ = v;
     // No shrink candidates
     var si = g.shrink(100, arena_state.allocator());
@@ -548,7 +548,7 @@ test "flatMap: dependent generation" {
     var seen_0 = false;
     var seen_1000 = false;
     for (0..200) |_| {
-        const v = g.generate(prng.random(), std.testing.allocator);
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
         if (v == 0) seen_0 = true;
         if (v == 1000) seen_1000 = true;
         try std.testing.expect(v == 0 or v == 1000);
@@ -567,5 +567,5 @@ test "filter: exhaustion does not panic" {
         }
     }.pred);
     // This should NOT panic -- just returns a value
-    _ = g.generate(prng.random(), std.testing.allocator);
+    _ = g.generate(prng.random(), std.testing.allocator, 100);
 }
