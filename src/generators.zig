@@ -43,27 +43,64 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
         }.f,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                // Shrink toward min by shifting into [0, max-min] space,
-                // shrinking there, then shifting back. All candidates are
-                // guaranteed to be in [min, max].
-                const RangeShrinkState = struct {
-                    inner: shrink.IntShrinkState(T),
+                // Direct binary search in [min, value] toward min.
+                // All candidates are in-range by construction — no wrapping
+                // arithmetic, no silently dropped candidates.
+                if (value == min) return ShrinkIter(T).empty();
 
-                    fn nextClamped(self: *@This()) ?T {
-                        while (self.inner.next()) |raw| {
-                            const shifted = raw +% min;
-                            if (shifted >= min and shifted <= max) return shifted;
+                const RangeShrinkState = struct {
+                    lo: T,
+                    hi: T,
+                    yielded_min: bool,
+                    done: bool,
+
+                    fn nextCandidate(self: *@This()) ?T {
+                        if (self.done) return null;
+
+                        if (!self.yielded_min) {
+                            self.yielded_min = true;
+                            return min;
                         }
-                        return null;
+
+                        // Binary search between lo and hi
+                        if (self.lo >= self.hi) {
+                            self.done = true;
+                            return null;
+                        }
+
+                        // Compute midpoint safely for both signed and unsigned.
+                        // For signed types, (hi - lo) can overflow the type, so
+                        // we widen to a larger integer for the arithmetic.
+                        const mid = blk: {
+                            const bits = @typeInfo(T).int.bits;
+                            const Wide = std.meta.Int(.signed, bits + 1);
+                            const lo_wide: Wide = self.lo;
+                            const hi_wide: Wide = self.hi;
+                            const mid_wide = lo_wide + @divTrunc(hi_wide - lo_wide, 2);
+                            break :blk @as(T, @intCast(mid_wide));
+                        };
+
+                        if (mid == self.lo) {
+                            self.done = true;
+                            return null;
+                        }
+
+                        self.lo = mid;
+                        return mid;
                     }
 
                     fn typeErasedNext(ctx: *anyopaque) ?T {
                         const self: *@This() = @ptrCast(@alignCast(ctx));
-                        return self.nextClamped();
+                        return self.nextCandidate();
                     }
                 };
                 const state = allocator.create(RangeShrinkState) catch return ShrinkIter(T).empty();
-                state.* = .{ .inner = shrink.IntShrinkState(T).init(value -% min) };
+                state.* = .{
+                    .lo = min,
+                    .hi = value,
+                    .yielded_min = false,
+                    .done = false,
+                };
                 return .{
                     .context = @ptrCast(state),
                     .nextFn = RangeShrinkState.typeErasedNext,
@@ -226,6 +263,28 @@ test "intRange: signed range shrinker stays within bounds" {
     while (si.next()) |v| {
         try std.testing.expect(v >= -5);
         try std.testing.expect(v <= 5);
+    }
+}
+
+test "intRange: signed cross-zero range produces monotonic candidates" {
+    // This is the case that was problematic with the old shift-based approach:
+    // intRange(i8, -100, 100) with value 50 would overflow during shift-back.
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(i8, -100, 100);
+    var si = g.shrink(50, arena_state.allocator());
+
+    // First candidate should be min (-100)
+    const first = si.next().?;
+    try std.testing.expectEqual(@as(i8, -100), first);
+
+    // All subsequent candidates should be monotonically increasing toward value
+    var prev: i8 = -100;
+    while (si.next()) |v| {
+        try std.testing.expect(v >= -100);
+        try std.testing.expect(v <= 100);
+        try std.testing.expect(v > prev);
+        prev = v;
     }
 }
 

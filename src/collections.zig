@@ -538,14 +538,11 @@ pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
 
 /// Sample N values from a generator. Useful for debugging generators.
 /// Returns a heap-allocated slice of generated values.
+/// Logs the seed used so results can be reproduced with `sampleWith`.
 pub fn sample(comptime T: type, gen: Gen(T), n: usize, allocator: std.mem.Allocator) ![]T {
-    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))));
-    const rng = prng.random();
-    const result = try allocator.alloc(T, n);
-    for (result) |*slot| {
-        slot.* = gen.generate(rng, allocator);
-    }
-    return result;
+    const seed = @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    std.log.info("zcheck.sample: using seed 0x{x} (reproduce with sampleWith(..., 0x{x}, ...))", .{ seed, seed });
+    return sampleWith(T, gen, n, seed, allocator);
 }
 
 /// Sample N values with a specific seed for reproducibility.

@@ -215,6 +215,8 @@ pub fn check(
 
     // Use an arena for generated values so they are freed in bulk.
     // This prevents leaks when generators allocate (slices, strings).
+    // The arena is reset between passing tests to cap memory usage --
+    // only the current test case's allocations are live at any time.
     var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer gen_arena.deinit();
     const gen_alloc = gen_arena.allocator();
@@ -229,6 +231,10 @@ pub fn check(
                 .num_discarded = discards,
             } };
         }
+
+        // Reset arena before generating each test case. Previous test's
+        // allocations (slices, strings) are no longer needed.
+        _ = gen_arena.reset(.retain_capacity);
 
         const value = gen.generate(rng, gen_alloc);
 
@@ -245,7 +251,9 @@ pub fn check(
                 discards += 1;
                 continue;
             }
-            // Property failed -- attempt shrinking
+            // Property failed -- the arena still holds the failing value's
+            // allocations. Pass it directly to doShrink (which uses its own
+            // arena for shrink state).
             const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
 
             return .{ .failed = .{
