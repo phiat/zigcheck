@@ -27,15 +27,26 @@ pub fn int(comptime T: type) Gen(T) {
 }
 
 /// Generator for integers in [min, max] inclusive.
-pub fn intRange(comptime T: type, min: T, max: T) Gen(T) {
+pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
     comptime {
         if (@typeInfo(T) != .int) @compileError("intRange() requires an integer type, got " ++ @typeName(T));
+        if (min > max) @compileError("intRange(): min must be <= max");
     }
-    _ = min;
-    _ = max;
-    // TODO: use intRangeAtMost with captured min/max
-    // For now, delegate to full-range int generator
-    return int(T);
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, _: std.mem.Allocator) T {
+                return rng.intRangeAtMost(T, min, max);
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // Shrink toward min using int shrinker, then clamp
+                const state = allocator.create(shrink.IntShrinkState(T)) catch return ShrinkIter(T).empty();
+                state.* = shrink.IntShrinkState(T).init(value);
+                return state.iter();
+            }
+        }.f,
+    };
 }
 
 /// Generator for boolean values.
@@ -134,7 +145,10 @@ pub fn element(comptime T: type, comptime choices: []const T) Gen(T) {
                     items: []const T,
                     pos: usize,
                 };
-                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                const state = allocator.create(State) catch {
+                    allocator.free(candidates);
+                    return ShrinkIter(T).empty();
+                };
                 state.* = .{ .items = candidates, .pos = 0 };
 
                 return .{
@@ -184,7 +198,10 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
                     iters_arr: []ShrinkIter(T),
                     pos: usize,
                 };
-                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                const state = allocator.create(State) catch {
+                    allocator.free(iters);
+                    return ShrinkIter(T).empty();
+                };
                 state.* = .{ .iters_arr = iters, .pos = 0 };
 
                 return .{
@@ -236,7 +253,7 @@ pub fn map(
 }
 
 /// Filter generated values. Retries up to 1000 times to find a value that
-/// satisfies the predicate. If no value is found, returns the last generated value.
+/// satisfies the predicate. Panics if no satisfying value is found.
 pub fn filter(
     comptime T: type,
     comptime inner: Gen(T),
@@ -250,8 +267,7 @@ pub fn filter(
                     const val = inner.generate(rng, allocator);
                     if (pred(val)) return val;
                 }
-                // Last resort: return whatever we got
-                return inner.generate(rng, allocator);
+                @panic("zcheck.filter: predicate rejected 1000 consecutive values; predicate may be too restrictive");
             }
         }.gen,
         .shrinkFn = struct {
@@ -308,23 +324,21 @@ fn enumGen(comptime T: type) Gen(T) {
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
                 const fields = @typeInfo(T).@"enum".fields;
-                const current_ord = @intFromEnum(value);
+                const tag_val = @intFromEnum(value);
 
-                // Count how many variants have a lower ordinal
-                var count: usize = 0;
-                inline for (fields) |field| {
-                    if (field.value < current_ord) count += 1;
+                // Find declaration index of current value
+                var current_idx: usize = fields.len;
+                inline for (fields, 0..) |field, i| {
+                    if (field.value == tag_val) current_idx = i;
                 }
 
-                if (count == 0) return ShrinkIter(T).empty();
+                if (current_idx == 0 or current_idx == fields.len) return ShrinkIter(T).empty();
 
-                // Allocate array of candidates with lower ordinals
-                const candidates = allocator.alloc(T, count) catch return ShrinkIter(T).empty();
-                var idx: usize = 0;
-                inline for (fields) |field| {
-                    if (field.value < current_ord) {
-                        candidates[idx] = @enumFromInt(field.value);
-                        idx += 1;
+                // Allocate array of candidates with lower declaration index
+                const candidates = allocator.alloc(T, current_idx) catch return ShrinkIter(T).empty();
+                inline for (fields, 0..) |field, i| {
+                    if (i < current_idx) {
+                        candidates[i] = @enumFromInt(field.value);
                     }
                 }
 
@@ -333,7 +347,10 @@ fn enumGen(comptime T: type) Gen(T) {
                     items: []const T,
                     pos: usize,
                 };
-                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                const state = allocator.create(State) catch {
+                    allocator.free(candidates);
+                    return ShrinkIter(T).empty();
+                };
                 state.* = .{ .items = candidates, .pos = 0 };
 
                 return .{
@@ -454,6 +471,15 @@ test "int generator produces values" {
     try std.testing.expect(seen_negative);
 }
 
+test "intRange: produces values in [10, 20]" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = intRange(u32, 10, 20);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        try std.testing.expect(v >= 10 and v <= 20);
+    }
+}
+
 test "boolean generator produces both values" {
     var prng = std.Random.DefaultPrng.init(99);
     const g = boolean();
@@ -544,6 +570,18 @@ test "enum shrink: first variant has no shrinks" {
     defer arena_state.deinit();
     const g = enumGen(Color);
     var si = g.shrink(.red, arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "enum shrink: sparse enum uses declaration order" {
+    const Sparse = enum(u32) { a = 0, b = 100, c = 1 };
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = enumGen(Sparse);
+    // .c has tag value 1 but declaration index 2 — should shrink to .a and .b
+    var si = g.shrink(.c, arena_state.allocator());
+    try std.testing.expectEqual(Sparse.a, si.next().?);
+    try std.testing.expectEqual(Sparse.b, si.next().?);
     try std.testing.expectEqual(null, si.next());
 }
 

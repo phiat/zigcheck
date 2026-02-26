@@ -15,6 +15,8 @@ pub const Config = struct {
     seed: ?u64 = null,
     /// Print each test case as it runs.
     verbose: bool = false,
+    /// Allocator for generated values. Defaults to std.testing.allocator.
+    allocator: std.mem.Allocator = std.testing.allocator,
 };
 
 pub fn CheckResult(comptime T: type) type {
@@ -55,12 +57,13 @@ pub fn forAllWith(
                 \\
                 \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
                 \\
-                \\  Shrunk ({d} steps)
+                \\  Counterexample: {any}
+                \\  Shrunk ({d} steps) from: {any}
                 \\  Reproduction seed: 0x{x}
                 \\  Rerun with: .seed = 0x{x}
                 \\
                 \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            , .{ f.num_tests_before_fail, f.shrink_steps, f.seed, f.seed });
+            , .{ f.num_tests_before_fail, f.shrunk, f.shrink_steps, f.original, f.seed, f.seed });
             return error.PropertyFalsified;
         },
     }
@@ -78,7 +81,7 @@ pub fn check(
     const rng = prng.random();
 
     for (0..config.num_tests) |i| {
-        const value = gen.generate(rng, std.testing.allocator);
+        const value = gen.generate(rng, config.allocator);
 
         if (config.verbose) {
             std.log.info("zcheck: test {d}/{d}", .{ i + 1, config.num_tests });
@@ -123,11 +126,14 @@ fn doShrink(
     var best = original;
     var steps: usize = 0;
 
+    // Arena is NOT reset between iterations because `best` may hold pointers
+    // into arena memory (e.g., if T contains slices). The arena is freed in
+    // bulk at the end via defer deinit. Memory growth is bounded by max_shrinks
+    // * sizeof(shrink state) which is negligible.
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
 
     for (0..max_shrinks) |_| {
-        _ = arena_state.reset(.retain_capacity);
         var iter = gen.shrink(best, arena_state.allocator());
         var improved = false;
 

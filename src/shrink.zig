@@ -16,10 +16,13 @@ pub fn ShrinkIter(comptime T: type) type {
             return self.nextFn(self.context);
         }
 
+        /// Sentinel for empty shrinkers — a valid pointer that is never dereferenced.
+        var empty_sentinel: u8 = 0;
+
         /// An empty shrinker that yields nothing.
         pub fn empty() Self {
             return .{
-                .context = undefined,
+                .context = @ptrCast(&empty_sentinel),
                 .nextFn = struct {
                     fn f(_: *anyopaque) ?T {
                         return null;
@@ -86,9 +89,11 @@ pub fn IntShrinkState(comptime T: type) type {
             const info = @typeInfo(T).int;
             if (info.signedness == .signed and self.target < 0 and !self.yielded_sign_flip) {
                 self.yielded_sign_flip = true;
-                if (self.target != std.math.minInt(T)) {
+                // Can't negate minInt, but maxInt is the closest positive approximation
+                if (self.target == std.math.minInt(T))
+                    return std.math.maxInt(T)
+                else
                     return -self.target;
-                }
             }
 
             // Binary search: yield midpoint between lo and hi
@@ -239,6 +244,13 @@ test "int shrink: negative value offers positive flip" {
     var si = state.iter();
     try std.testing.expectEqual(@as(i32, 0), si.next().?); // zero first
     try std.testing.expectEqual(@as(i32, 42), si.next().?); // sign flip
+}
+
+test "int shrink: minInt offers maxInt as sign flip" {
+    var state = IntShrinkState(i32).init(std.math.minInt(i32));
+    var si = state.iter();
+    try std.testing.expectEqual(@as(i32, 0), si.next().?);
+    try std.testing.expectEqual(std.math.maxInt(i32), si.next().?);
 }
 
 test "int shrink: produces decreasing candidates" {
