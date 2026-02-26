@@ -1,7 +1,7 @@
 # zcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-80%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-95%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-25%2B-blueviolet)](#generators)
@@ -101,7 +101,7 @@ try zcheck.forAll([]const u8, zcheck.asciiString(50), struct {
 
 | Generator | Type | Description |
 |---|---|---|
-| `auto(T)` | `Gen(T)` | Auto-derive from `int`, `float`, `bool`, `enum`, `struct` |
+| `auto(T)` | `Gen(T)` | Auto-derive from `int`, `float`, `bool`, `enum`, `struct`, `?T`, `[]const T`, `union(enum)` |
 
 `auto` handles nested structs and enums via comptime reflection:
 
@@ -266,6 +266,8 @@ Use `.seed` for deterministic, reproducible test runs. Failed tests print their 
 | `counterexample(fmt, args)` | Log context before a property failure |
 | `expectFailure(T, gen, property)` | Pass only if the property fails |
 | `forAllLabeled(T, gen, property, classifier)` | Collect coverage statistics |
+| `forAllLabeledWith(config, T, gen, property, classifier)` | Labeled check with explicit config |
+| `checkLabeled(config, T, gen, property, classifier, alloc)` | Return `CheckResultLabeled` without failing |
 
 ### Utility
 

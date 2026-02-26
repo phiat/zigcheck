@@ -39,7 +39,8 @@ pub const TestDiscarded = runner.TestDiscarded;
 pub const counterexample = runner.counterexample;
 pub const forAllLabeled = runner.forAllLabeled;
 pub const forAllLabeledWith = runner.forAllLabeledWith;
-pub const LabelResult = runner.LabelResult;
+pub const checkLabeled = runner.checkLabeled;
+pub const CheckResultLabeled = runner.CheckResultLabeled;
 pub const CoverageResult = runner.CoverageResult;
 
 // -- Convenience re-exports -----------------------------------------------
@@ -66,6 +67,7 @@ pub const oneOf = generators.oneOf;
 pub const frequency = generators.frequency;
 pub const map = generators.map;
 pub const filter = generators.filter;
+pub const FilterExhausted = generators.FilterExhausted;
 pub const noShrink = generators.noShrink;
 pub const shrinkMap = generators.shrinkMap;
 

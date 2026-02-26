@@ -611,6 +611,9 @@ pub fn map(
 
 /// Filter generated values. Retries up to 1000 times to find a value that
 /// satisfies the predicate. Panics if no satisfying value is found.
+/// Error returned when a filter predicate rejects too many consecutive values.
+pub const FilterExhausted = error.FilterExhausted;
+
 pub fn filter(
     comptime T: type,
     comptime inner: Gen(T),
@@ -624,7 +627,13 @@ pub fn filter(
                     const val = inner.generate(rng, allocator);
                     if (pred(val)) return val;
                 }
-                @panic("zcheck.filter: predicate rejected 1000 consecutive values; predicate may be too restrictive");
+                // Log a diagnostic rather than panicking so the test runner can
+                // report the seed and continue with other tests.
+                std.log.warn("zcheck.filter: predicate rejected {d} consecutive values; predicate may be too restrictive", .{max_retries});
+                // Return the last generated value even though it doesn't pass the
+                // predicate. This lets the runner proceed (the property will likely
+                // fail, and the seed will be reported).
+                return inner.generate(rng, allocator);
             }
         }.gen,
         .shrinkFn = struct {
@@ -787,8 +796,50 @@ pub fn shuffle(comptime T: type, comptime items: []const T) Gen([]const T) {
             }
         }.gen,
         .shrinkFn = struct {
-            fn f(_: []const T, _: std.mem.Allocator) ShrinkIter([]const T) {
-                return ShrinkIter([]const T).empty();
+            fn f(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
+                // Shrink toward original order by undoing adjacent out-of-order swaps.
+                // For each position i where value[i] > value[i+1] relative to the
+                // original list's ordering, yield a copy with those two elements swapped.
+                if (value.len < 2) return ShrinkIter([]const T).empty();
+
+                const State = struct {
+                    original: []const T,
+                    alloc: std.mem.Allocator,
+                    pos: usize,
+
+                    fn nextImpl(ctx: *anyopaque) ?[]const T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        while (self.pos + 1 < self.original.len) {
+                            const i = self.pos;
+                            self.pos += 1;
+                            // Check if swapping would move toward sorted order
+                            const idx_a = originalIndex(self.original[i]);
+                            const idx_b = originalIndex(self.original[i + 1]);
+                            if (idx_a > idx_b) {
+                                // Out of order relative to items -- yield swapped copy
+                                const buf = self.alloc.alloc(T, self.original.len) catch return null;
+                                @memcpy(buf, self.original);
+                                buf[i] = self.original[i + 1];
+                                buf[i + 1] = self.original[i];
+                                return buf;
+                            }
+                        }
+                        return null;
+                    }
+
+                    fn originalIndex(val: T) usize {
+                        for (items, 0..) |item, i| {
+                            if (std.meta.eql(item, val)) return i;
+                        }
+                        return items.len; // not found
+                    }
+                };
+                const state = allocator.create(State) catch return ShrinkIter([]const T).empty();
+                state.* = .{ .original = value, .alloc = allocator, .pos = 0 };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.nextImpl,
+                };
             }
         }.f,
     };
@@ -911,6 +962,13 @@ pub fn orderedList(comptime T: type, comptime inner: Gen(T), comptime max_len: u
 /// Generate values from a comptime-known list, biasing toward earlier elements
 /// as the test progresses. Similar to QuickCheck's growingElements.
 /// Early tests get items near the beginning; later tests get items from anywhere.
+/// Pick from a comptime-known list with a bias toward earlier elements.
+/// Uses min-of-three random indices to create a distribution that strongly
+/// favors the beginning of the list. For a list of length N, the probability
+/// of picking index k is proportional to (N-k)^3 - (N-k-1)^3.
+///
+/// Note: unlike Haskell's QuickCheck, this bias is static (not size-dependent)
+/// because Zig generators don't receive a "size" parameter.
 pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
     comptime {
         if (items.len == 0) @compileError("growingElements() requires at least one item");
@@ -918,11 +976,11 @@ pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
     return .{
         .genFn = struct {
             fn gen(rng: std.Random, _: std.mem.Allocator) T {
-                // Without sized infrastructure, use the RNG to bias toward early elements:
-                // pick two random indices and take the minimum (biases toward 0)
+                // Min-of-three gives a steeper bias toward index 0.
                 const idx1 = rng.intRangeAtMost(usize, 0, items.len - 1);
                 const idx2 = rng.intRangeAtMost(usize, 0, items.len - 1);
-                return items[@min(idx1, idx2)];
+                const idx3 = rng.intRangeAtMost(usize, 0, items.len - 1);
+                return items[@min(idx1, @min(idx2, idx3))];
             }
         }.gen,
         .shrinkFn = struct {
@@ -989,6 +1047,8 @@ pub fn flatMap(
 }
 
 /// Auto-derive a generator for any supported type via comptime reflection.
+/// Supports: int, float, bool, enum, struct, optional (?T), pointer-to-slice
+/// ([]const T), and tagged unions (union(enum)).
 pub fn auto(comptime T: type) Gen(T) {
     return switch (@typeInfo(T)) {
         .int => int(T),
@@ -996,6 +1056,17 @@ pub fn auto(comptime T: type) Gen(T) {
         .bool => boolean(),
         .@"enum" => enumGen(T),
         .@"struct" => structGen(T),
+        .optional => |info| optionalGen(info.child),
+        .pointer => |info| blk: {
+            if (info.size == .slice and info.is_const) {
+                break :blk sliceAutoGen(info.child);
+            }
+            @compileError("zcheck.auto: unsupported pointer type " ++ @typeName(T) ++ "; only []const T slices are supported");
+        },
+        .@"union" => |info| if (info.tag_type != null)
+            unionGen(T)
+        else
+            @compileError("zcheck.auto: untagged union " ++ @typeName(T) ++ " is not supported; use union(enum) instead"),
         else => @compileError("zcheck.auto: unsupported type " ++ @typeName(T)),
     };
 }
@@ -1145,6 +1216,180 @@ fn structGen(comptime T: type) Gen(T) {
                     .context = @ptrCast(chain),
                     .nextFn = ChainState.nextChain,
                 };
+            }
+        }.f,
+    };
+}
+
+/// Generator for optional types -- 10% chance of null, 90% chance of a value.
+fn optionalGen(comptime Child: type) Gen(?Child) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) ?Child {
+                // ~10% null
+                if (rng.intRangeAtMost(u8, 0, 9) == 0) return null;
+                return auto(Child).generate(rng, allocator);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: ?Child, allocator: std.mem.Allocator) ShrinkIter(?Child) {
+                if (value) |v| {
+                    // Try null first, then shrink the inner value
+                    const State = struct {
+                        yielded_null: bool,
+                        inner: ShrinkIter(Child),
+
+                        fn nextImpl(ctx: *anyopaque) ??Child {
+                            const self: *@This() = @ptrCast(@alignCast(ctx));
+                            if (!self.yielded_null) {
+                                self.yielded_null = true;
+                                return @as(?Child, null); // yield the ?Child value null
+                            }
+                            if (self.inner.next()) |shrunk| {
+                                return @as(?Child, shrunk);
+                            }
+                            return @as(??Child, null); // end of iteration
+                        }
+                    };
+                    const state = allocator.create(State) catch return ShrinkIter(?Child).empty();
+                    state.* = .{
+                        .yielded_null = false,
+                        .inner = auto(Child).shrink(v, allocator),
+                    };
+                    return .{
+                        .context = @ptrCast(state),
+                        .nextFn = State.nextImpl,
+                    };
+                } else {
+                    return ShrinkIter(?Child).empty();
+                }
+            }
+        }.f,
+    };
+}
+
+/// Generator for []const T slices via auto -- delegates to slice(T, auto(T), 20).
+fn sliceAutoGen(comptime Child: type) Gen([]const Child) {
+    return slice(Child, auto(Child), 20);
+}
+
+/// Generator for tagged unions -- picks a random variant, generates its payload.
+fn unionGen(comptime T: type) Gen(T) {
+    const info = @typeInfo(T).@"union";
+    const fields = info.fields;
+    comptime {
+        if (fields.len == 0) @compileError("unionGen: union has no fields");
+    }
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+                const idx = rng.intRangeAtMost(usize, 0, fields.len - 1);
+                inline for (fields, 0..) |field, i| {
+                    if (idx == i) {
+                        if (field.type == void) {
+                            return @unionInit(T, field.name, {});
+                        } else {
+                            return @unionInit(T, field.name, auto(field.type).generate(rng, allocator));
+                        }
+                    }
+                }
+                unreachable;
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // Shrink by trying earlier variants (void payload), then shrinking the payload.
+                const tag = @intFromEnum(std.meta.activeTag(value));
+
+                // Count: earlier void variants + payload shrinks
+                var count: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
+                        if (field.type == void) count += 1;
+                    }
+                    _ = i;
+                }
+
+                // For simplicity, just try earlier void variants
+                if (count == 0) {
+                    // Try shrinking the payload of the current variant
+                    return shrinkUnionPayload(T, value, allocator);
+                }
+
+                const candidates = allocator.alloc(T, count) catch return ShrinkIter(T).empty();
+                var pos: usize = 0;
+                inline for (fields) |field| {
+                    if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
+                        if (field.type == void) {
+                            candidates[pos] = @unionInit(T, field.name, {});
+                            pos += 1;
+                        }
+                    }
+                }
+
+                const State = struct {
+                    items: []const T,
+                    idx: usize,
+                    payload_shrinker: ShrinkIter(T),
+                    payload_done: bool,
+
+                    fn nextVariant(ctx: *anyopaque) ?T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        if (self.idx < self.items.len) {
+                            const val = self.items[self.idx];
+                            self.idx += 1;
+                            return val;
+                        }
+                        if (!self.payload_done) {
+                            if (self.payload_shrinker.next()) |val| return val;
+                            self.payload_done = true;
+                        }
+                        return null;
+                    }
+                };
+                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                state.* = .{
+                    .items = candidates,
+                    .idx = 0,
+                    .payload_shrinker = shrinkUnionPayload(T, value, allocator),
+                    .payload_done = false,
+                };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.nextVariant,
+                };
+            }
+
+            fn shrinkUnionPayload(comptime U: type, value: U, allocator: std.mem.Allocator) ShrinkIter(U) {
+                const u_info = @typeInfo(U).@"union";
+                const u_fields = u_info.fields;
+                inline for (u_fields) |field| {
+                    if (std.meta.activeTag(value) == @field(u_info.tag_type.?, field.name)) {
+                        if (field.type == void) return ShrinkIter(U).empty();
+                        const payload = @field(value, field.name);
+                        const inner_iter = allocator.create(ShrinkIter(field.type)) catch return ShrinkIter(U).empty();
+                        inner_iter.* = auto(field.type).shrink(payload, allocator);
+
+                        const Mapper = struct {
+                            inner: *ShrinkIter(field.type),
+
+                            fn nextMapped(ctx: *anyopaque) ?U {
+                                const self: *@This() = @ptrCast(@alignCast(ctx));
+                                if (self.inner.next()) |shrunk_payload| {
+                                    return @unionInit(U, field.name, shrunk_payload);
+                                }
+                                return null;
+                            }
+                        };
+                        const mapper = allocator.create(Mapper) catch return ShrinkIter(U).empty();
+                        mapper.* = .{ .inner = inner_iter };
+                        return .{
+                            .context = @ptrCast(mapper),
+                            .nextFn = Mapper.nextMapped,
+                        };
+                    }
+                }
+                return ShrinkIter(U).empty();
             }
         }.f,
     };
@@ -1577,7 +1822,7 @@ test "orderedList: shrink candidates are sorted" {
     }
 }
 
-test "growingElements: biases toward early elements" {
+test "growingElements: min-of-three biases toward early elements" {
     var prng = std.Random.DefaultPrng.init(42);
     const items = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     const g = growingElements(u32, &items);
@@ -1586,9 +1831,9 @@ test "growingElements: biases toward early elements" {
     for (0..n) |_| {
         sum += g.generate(prng.random(), std.testing.allocator);
     }
-    // With min-of-two bias, average should be well below 4.5 (uniform midpoint)
+    // With min-of-three bias, average should be well below 3.0 (uniform midpoint is 4.5)
     const avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(n));
-    try std.testing.expect(avg < 4.0);
+    try std.testing.expect(avg < 3.0);
 }
 
 test "sample: returns N values" {
@@ -1770,3 +2015,130 @@ test "slice shrink: empty slice has no shrinks" {
     var si = g.shrink(original, arena_state.allocator());
     try std.testing.expectEqual(null, si.next());
 }
+
+// -- filter tests ---------------------------------------------------------
+
+test "filter: exhaustion does not panic" {
+    // A predicate that always rejects should not panic -- it returns a value
+    // and logs a warning instead.
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = filter(u32, int(u32), struct {
+        fn pred(_: u32) bool {
+            return false; // always reject
+        }
+    }.pred);
+    // This should NOT panic -- just returns a value
+    _ = g.generate(prng.random(), std.testing.allocator);
+}
+
+// -- auto() optional tests ------------------------------------------------
+
+test "auto: optional generates both null and non-null" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = auto(?i32);
+    var seen_null = false;
+    var seen_value = false;
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        if (v) |_| {
+            seen_value = true;
+        } else {
+            seen_null = true;
+        }
+    }
+    try std.testing.expect(seen_null);
+    try std.testing.expect(seen_value);
+}
+
+test "auto: optional shrinks to null first" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = auto(?i32);
+    var si = g.shrink(@as(?i32, 42), arena_state.allocator());
+    const first = si.next().?;
+    try std.testing.expectEqual(@as(?i32, null), first);
+}
+
+// -- auto() slice tests ---------------------------------------------------
+
+test "auto: slice []const i32 generates values" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = auto([]const i32);
+    for (0..20) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator());
+        try std.testing.expect(v.len <= 20);
+    }
+}
+
+// -- auto() union tests ---------------------------------------------------
+
+test "auto: tagged union generates all variants" {
+    const MyUnion = union(enum) {
+        empty: void,
+        value: i32,
+        flag: bool,
+    };
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = auto(MyUnion);
+    var seen_empty = false;
+    var seen_value = false;
+    var seen_flag = false;
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        switch (v) {
+            .empty => seen_empty = true,
+            .value => seen_value = true,
+            .flag => seen_flag = true,
+        }
+    }
+    try std.testing.expect(seen_empty);
+    try std.testing.expect(seen_value);
+    try std.testing.expect(seen_flag);
+}
+
+test "auto: tagged union shrinker produces candidates" {
+    const MyUnion = union(enum) {
+        empty: void,
+        value: i32,
+    };
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = auto(MyUnion);
+    // Shrink .value(100) -- should try .empty first (earlier variant), then shrink the i32
+    var si = g.shrink(MyUnion{ .value = 100 }, arena_state.allocator());
+    const first = si.next().?;
+    // First candidate should be the earlier void variant
+    switch (first) {
+        .empty => {},
+        .value => return error.TestUnexpectedResult,
+    }
+}
+
+// -- shuffle shrinker tests -----------------------------------------------
+
+test "shuffle: shrinker tries to restore original order" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const items = &[_]u32{ 1, 2, 3 };
+    const g = shuffle(u32, items);
+    // Reversed order should produce swap candidates
+    const reversed = &[_]u32{ 3, 2, 1 };
+    var si = g.shrink(reversed, arena_state.allocator());
+    const first = si.next().?;
+    // First swap should be at position 0: swap 3,2 -> [2,3,1]
+    try std.testing.expectEqual(@as(u32, 2), first[0]);
+    try std.testing.expectEqual(@as(u32, 3), first[1]);
+    try std.testing.expectEqual(@as(u32, 1), first[2]);
+}
+
+test "shuffle: already sorted has no shrinks" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const items = &[_]u32{ 1, 2, 3 };
+    const g = shuffle(u32, items);
+    var si = g.shrink(items, arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+

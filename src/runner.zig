@@ -158,29 +158,11 @@ pub fn forAllWith(
     switch (result) {
         .passed => {},
         .failed => |f| {
-            std.log.err(
-                \\
-                \\--- zcheck: FAILED after {d} tests ------------------------
-                \\
-                \\  Counterexample: {any}
-                \\  Shrunk ({d} steps) from: {any}
-                \\  Reproduction seed: 0x{x}
-                \\  Rerun with: .seed = 0x{x}
-                \\
-                \\------------------------------------------------------
-            , .{ f.num_tests_before_fail, f.shrunk, f.shrink_steps, f.original, f.seed, f.seed });
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
-            std.log.err(
-                \\
-                \\--- zcheck: GAVE UP after {d} tests -----------------------
-                \\
-                \\  Only {d} tests passed before {d} were discarded.
-                \\  Consider using a more targeted generator instead of assume().
-                \\
-                \\------------------------------------------------------
-            , .{ g.num_tests, g.num_tests, g.num_discarded });
+            logGaveUp(g.num_tests, g.num_discarded);
             return error.GaveUp;
         },
     }
@@ -189,6 +171,35 @@ pub fn forAllWith(
 /// Resolve seed from config, using time-based fallback if null.
 fn resolveSeed(config: Config) u64 {
     return config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+}
+
+/// Shared failure reporting. counterexample and original are format-ready tuples.
+fn logFailure(num_tests: usize, comptime ce_fmt: []const u8, ce_args: anytype, comptime orig_fmt: []const u8, orig_args: anytype, shrink_steps: usize, seed: u64) void {
+    std.log.err(
+        \\
+        \\--- zcheck: FAILED after {d} tests ------------------------
+        \\
+        ++ "\\  Counterexample: " ++ ce_fmt ++
+        \\
+        ++ "\\  Shrunk ({d} steps) from: " ++ orig_fmt ++
+        \\
+        \\  Reproduction seed: 0x{x}
+        \\  Rerun with: .seed = 0x{x}
+        \\
+        \\------------------------------------------------------
+    , .{num_tests} ++ ce_args ++ .{shrink_steps} ++ orig_args ++ .{ seed, seed });
+}
+
+fn logGaveUp(num_tests: usize, num_discarded: usize) void {
+    std.log.err(
+        \\
+        \\--- zcheck: GAVE UP after {d} tests -----------------------
+        \\
+        \\  Only {d} tests passed before {d} were discarded.
+        \\  Consider using a more targeted generator instead of assume().
+        \\
+        \\------------------------------------------------------
+    , .{ num_tests, num_tests, num_discarded });
 }
 
 /// Run a property check and return the result without failing.
@@ -310,13 +321,6 @@ fn doShrink(
 
 // -- Labeled / coverage properties ----------------------------------------
 
-/// Result from a labeled property: the property either passes, fails, or
-/// discards, and optionally provides one or more labels for coverage tracking.
-pub const LabelResult = struct {
-    err: ?anyerror = null,
-    labels: []const []const u8 = &.{},
-};
-
 /// Coverage statistics collected during a labeled property check.
 pub const CoverageResult = struct {
     num_tests: usize,
@@ -345,22 +349,40 @@ pub fn forAllLabeled(
     return forAllLabeledWith(.{}, T, gen, property, classifier);
 }
 
-/// Run a labeled property check with explicit config.
-pub fn forAllLabeledWith(
+/// Result of a labeled property check.
+pub fn CheckResultLabeled(comptime T: type) type {
+    return union(enum) {
+        passed: struct {
+            num_tests: usize,
+            label_names: []const []const u8,
+            label_counts: []const usize,
+        },
+        failed: struct {
+            seed: u64,
+            original: T,
+            shrunk: T,
+            shrink_steps: usize,
+            num_tests_before_fail: usize,
+        },
+        gave_up: struct {
+            num_tests: usize,
+            num_discarded: usize,
+        },
+    };
+}
+
+/// Run a labeled property check and return the result without failing.
+pub fn checkLabeled(
     config: Config,
     comptime T: type,
     gen: Gen(T),
     property: *const fn (T) anyerror!void,
     classifier: *const fn (T) []const []const u8,
-) !void {
+    arena_alloc: std.mem.Allocator,
+) CheckResultLabeled(T) {
     const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
-
-    // Use an arena for label tracking and generated value allocations
-    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer label_arena.deinit();
-    const arena_alloc = label_arena.allocator();
 
     // Track label counts using a hash map
     var label_map = std.StringHashMap(usize).init(arena_alloc);
@@ -370,17 +392,18 @@ pub fn forAllLabeledWith(
 
     while (tests_run < config.num_tests) {
         if (discards >= config.max_discard) {
-            std.log.err("zcheck: gave up after {d} discards", .{discards});
-            return error.GaveUp;
+            return .{ .gave_up = .{
+                .num_tests = tests_run,
+                .num_discarded = discards,
+            } };
         }
 
         const value = gen.generate(rng, arena_alloc);
 
         if (property(value)) |_| {
-            // Collect labels
             const labels = classifier(value);
             for (labels) |label| {
-                const entry = try label_map.getOrPut(label);
+                const entry = label_map.getOrPut(label) catch continue;
                 if (!entry.found_existing) {
                     entry.value_ptr.* = 0;
                 }
@@ -393,29 +416,75 @@ pub fn forAllLabeledWith(
                 continue;
             }
             const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
-            std.log.err(
-                \\
-                \\--- zcheck: FAILED after {d} tests ------------------------
-                \\
-                \\  Counterexample: {any}
-                \\  Shrunk ({d} steps) from: {any}
-                \\  Reproduction seed: 0x{x}
-                \\  Rerun with: .seed = 0x{x}
-                \\
-                \\------------------------------------------------------
-            , .{ tests_run + 1, shrunk.value, shrunk.steps, value, seed, seed });
-            return error.PropertyFalsified;
+            return .{ .failed = .{
+                .seed = seed,
+                .original = value,
+                .shrunk = shrunk.value,
+                .shrink_steps = shrunk.steps,
+                .num_tests_before_fail = tests_run + 1,
+            } };
         }
     }
 
-    // Print coverage report
-    if (label_map.count() > 0) {
-        std.log.info("zcheck: {d} tests, coverage:", .{tests_run});
-        var iter = label_map.iterator();
-        while (iter.next()) |entry| {
-            const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(tests_run)) * 100.0;
-            std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
-        }
+    // Collect labels into parallel slices for the result
+    const count = label_map.count();
+    const names = arena_alloc.alloc([]const u8, count) catch return .{ .passed = .{
+        .num_tests = tests_run,
+        .label_names = &.{},
+        .label_counts = &.{},
+    } };
+    const counts = arena_alloc.alloc(usize, count) catch return .{ .passed = .{
+        .num_tests = tests_run,
+        .label_names = &.{},
+        .label_counts = &.{},
+    } };
+
+    var iter = label_map.iterator();
+    var idx: usize = 0;
+    while (iter.next()) |entry| {
+        names[idx] = entry.key_ptr.*;
+        counts[idx] = entry.value_ptr.*;
+        idx += 1;
+    }
+
+    return .{ .passed = .{
+        .num_tests = tests_run,
+        .label_names = names,
+        .label_counts = counts,
+    } };
+}
+
+/// Run a labeled property check with explicit config.
+pub fn forAllLabeledWith(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    classifier: *const fn (T) []const []const u8,
+) !void {
+    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer label_arena.deinit();
+
+    const result = checkLabeled(config, T, gen, property, classifier, label_arena.allocator());
+    switch (result) {
+        .passed => |p| {
+            // Print coverage report
+            if (p.label_names.len > 0) {
+                std.log.info("zcheck: {d} tests, coverage:", .{p.num_tests});
+                for (p.label_names, p.label_counts) |name, count| {
+                    const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
+                    std.log.info("  {d:.1}% {s}", .{ pct, name });
+                }
+            }
+        },
+        .failed => |f| {
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
+            return error.PropertyFalsified;
+        },
+        .gave_up => |g| {
+            logGaveUp(g.num_tests, g.num_discarded);
+            return error.GaveUp;
+        },
     }
 }
 
@@ -464,28 +533,11 @@ pub fn forAll2With(
     switch (result) {
         .passed => {},
         .failed => |f| {
-            std.log.err(
-                \\
-                \\--- zcheck: FAILED after {d} tests ------------------------
-                \\
-                \\  Counterexample: ({any}, {any})
-                \\  Shrunk ({d} steps) from: ({any}, {any})
-                \\  Reproduction seed: 0x{x}
-                \\  Rerun with: .seed = 0x{x}
-                \\
-                \\------------------------------------------------------
-            , .{ f.num_tests_before_fail, f.shrunk_a, f.shrunk_b, f.shrink_steps, f.original_a, f.original_b, f.seed, f.seed });
+            logFailure(f.num_tests_before_fail, "({any}, {any})", .{ f.shrunk_a, f.shrunk_b }, "({any}, {any})", .{ f.original_a, f.original_b }, f.shrink_steps, f.seed);
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
-            std.log.err(
-                \\
-                \\--- zcheck: GAVE UP after {d} tests -----------------------
-                \\
-                \\  Only {d} tests passed before {d} were discarded.
-                \\
-                \\------------------------------------------------------
-            , .{ g.num_tests, g.num_tests, g.num_discarded });
+            logGaveUp(g.num_tests, g.num_discarded);
             return error.GaveUp;
         },
     }
@@ -660,28 +712,11 @@ pub fn forAll3With(
     switch (result) {
         .passed => {},
         .failed => |f| {
-            std.log.err(
-                \\
-                \\--- zcheck: FAILED after {d} tests ------------------------
-                \\
-                \\  Counterexample: ({any}, {any}, {any})
-                \\  Shrunk ({d} steps) from: ({any}, {any}, {any})
-                \\  Reproduction seed: 0x{x}
-                \\  Rerun with: .seed = 0x{x}
-                \\
-                \\------------------------------------------------------
-            , .{ f.num_tests_before_fail, f.shrunk_a, f.shrunk_b, f.shrunk_c, f.shrink_steps, f.original_a, f.original_b, f.original_c, f.seed, f.seed });
+            logFailure(f.num_tests_before_fail, "({any}, {any}, {any})", .{ f.shrunk_a, f.shrunk_b, f.shrunk_c }, "({any}, {any}, {any})", .{ f.original_a, f.original_b, f.original_c }, f.shrink_steps, f.seed);
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
-            std.log.err(
-                \\
-                \\--- zcheck: GAVE UP after {d} tests -----------------------
-                \\
-                \\  Only {d} tests passed before {d} were discarded.
-                \\
-                \\------------------------------------------------------
-            , .{ g.num_tests, g.num_tests, g.num_discarded });
+            logGaveUp(g.num_tests, g.num_discarded);
             return error.GaveUp;
         },
     }
@@ -1113,6 +1148,49 @@ test "forAllLabeled: collects labels without error" {
             return &.{"zero"};
         }
     }.classify);
+}
+
+test "checkLabeled: returns passed with coverage data" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const result = checkLabeled(.{ .seed = 42, .num_tests = 50 }, i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop, struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify, arena.allocator());
+    switch (result) {
+        .passed => |p| {
+            try std.testing.expectEqual(@as(usize, 50), p.num_tests);
+            try std.testing.expect(p.label_names.len > 0);
+        },
+        .failed => return error.TestUnexpectedResult,
+        .gave_up => return error.TestUnexpectedResult,
+    }
+}
+
+test "checkLabeled: returns failed on property failure" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const result = checkLabeled(.{ .seed = 42, .num_tests = 50 }, u32, generators.int(u32), struct {
+        fn prop(n: u32) !void {
+            if (n > 10) return error.PropertyFalsified;
+        }
+    }.prop, struct {
+        fn classify(_: u32) []const []const u8 {
+            return &.{"all"};
+        }
+    }.classify, arena.allocator());
+    switch (result) {
+        .passed => return error.TestUnexpectedResult,
+        .failed => |f| {
+            try std.testing.expect(f.shrink_steps > 0);
+        },
+        .gave_up => return error.TestUnexpectedResult,
+    }
 }
 
 // -- forAll3 / check3 tests -----------------------------------------------
