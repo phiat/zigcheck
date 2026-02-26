@@ -60,7 +60,9 @@ pub const Config = struct {
     verbose: bool = false,
     /// Print each shrink step as it runs.
     verbose_shrink: bool = false,
-    /// Allocator for generated values. Defaults to std.testing.allocator.
+    /// Allocator available for user-side test helpers. The runner uses an
+    /// internal arena for generated values, so this is not needed for
+    /// basic usage. Defaults to std.testing.allocator.
     allocator: std.mem.Allocator = std.testing.allocator,
 };
 
@@ -184,6 +186,11 @@ pub fn forAllWith(
     }
 }
 
+/// Resolve seed from config, using time-based fallback if null.
+fn resolveSeed(config: Config) u64 {
+    return config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+}
+
 /// Run a property check and return the result without failing.
 pub fn check(
     config: Config,
@@ -191,9 +198,15 @@ pub fn check(
     gen: Gen(T),
     property: *const fn (T) anyerror!void,
 ) CheckResult(T) {
-    const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
+
+    // Use an arena for generated values so they are freed in bulk.
+    // This prevents leaks when generators allocate (slices, strings).
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     var tests_run: usize = 0;
     var discards: usize = 0;
@@ -206,10 +219,10 @@ pub fn check(
             } };
         }
 
-        const value = gen.generate(rng, config.allocator);
+        const value = gen.generate(rng, gen_alloc);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}", .{ tests_run + 1, config.num_tests });
+            std.log.info("zcheck: test {d}/{d}: {any}", .{ tests_run + 1, config.num_tests, value });
         }
 
         // Test the property
@@ -234,7 +247,7 @@ pub fn check(
         }
     }
 
-    return .{ .passed = .{ .num_tests = config.num_tests } };
+    return .{ .passed = .{ .num_tests = tests_run } };
 }
 
 const ShrinkResult = struct {
@@ -340,16 +353,17 @@ pub fn forAllLabeledWith(
     property: *const fn (T) anyerror!void,
     classifier: *const fn (T) []const []const u8,
 ) !void {
-    const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
-    // Use an arena for label tracking allocations
+    // Use an arena for label tracking and generated value allocations
     var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer label_arena.deinit();
+    const arena_alloc = label_arena.allocator();
 
     // Track label counts using a hash map
-    var label_map = std.StringHashMap(usize).init(label_arena.allocator());
+    var label_map = std.StringHashMap(usize).init(arena_alloc);
 
     var tests_run: usize = 0;
     var discards: usize = 0;
@@ -360,7 +374,7 @@ pub fn forAllLabeledWith(
             return error.GaveUp;
         }
 
-        const value = gen.generate(rng, config.allocator);
+        const value = gen.generate(rng, arena_alloc);
 
         if (property(value)) |_| {
             // Collect labels
@@ -486,9 +500,13 @@ pub fn check2(
     gen_b: Gen(B),
     property: *const fn (A, B) anyerror!void,
 ) CheckResult2(A, B) {
-    const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
+
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     var tests_run: usize = 0;
     var discards: usize = 0;
@@ -501,11 +519,11 @@ pub fn check2(
             } };
         }
 
-        const a = gen_a.generate(rng, config.allocator);
-        const b = gen_b.generate(rng, config.allocator);
+        const a = gen_a.generate(rng, gen_alloc);
+        const b = gen_b.generate(rng, gen_alloc);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}", .{ tests_run + 1, config.num_tests });
+            std.log.info("zcheck: test {d}/{d}: ({any}, {any})", .{ tests_run + 1, config.num_tests, a, b });
         }
 
         if (property(a, b)) |_| {
@@ -528,7 +546,7 @@ pub fn check2(
         }
     }
 
-    return .{ .passed = .{ .num_tests = config.num_tests } };
+    return .{ .passed = .{ .num_tests = tests_run } };
 }
 
 fn doShrink2(
@@ -668,9 +686,13 @@ pub fn check3(
     gen_c: Gen(C),
     property: *const fn (A, B, C) anyerror!void,
 ) CheckResult3(A, B, C) {
-    const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
+
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     var tests_run: usize = 0;
     var discards: usize = 0;
@@ -683,12 +705,12 @@ pub fn check3(
             } };
         }
 
-        const a = gen_a.generate(rng, config.allocator);
-        const b = gen_b.generate(rng, config.allocator);
-        const c = gen_c.generate(rng, config.allocator);
+        const a = gen_a.generate(rng, gen_alloc);
+        const b = gen_b.generate(rng, gen_alloc);
+        const c = gen_c.generate(rng, gen_alloc);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}", .{ tests_run + 1, config.num_tests });
+            std.log.info("zcheck: test {d}/{d}: ({any}, {any}, {any})", .{ tests_run + 1, config.num_tests, a, b, c });
         }
 
         if (property(a, b, c)) |_| {
@@ -713,7 +735,7 @@ pub fn check3(
         }
     }
 
-    return .{ .passed = .{ .num_tests = config.num_tests } };
+    return .{ .passed = .{ .num_tests = tests_run } };
 }
 
 fn doShrink3(
@@ -850,12 +872,10 @@ test "check: shrinks n > 5 to 6" {
 }
 
 test "check: shrinks slice to minimal length" {
-    // Use page_allocator for generation since generated slices are not freed
-    // by the caller (the runner doesn't own the generated values' memory).
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+    // Runner now uses an internal arena for generated values, so no
+    // special allocator needed.
     const result = check(
-        .{ .seed = 42, .num_tests = 200, .allocator = arena.allocator() },
+        .{ .seed = 42, .num_tests = 200 },
         []const u8,
         generators.slice(u8, generators.int(u8), 20),
         struct {

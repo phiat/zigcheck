@@ -282,9 +282,29 @@ pub fn unicodeChar() Gen(u21) {
         }.gen,
         .shrinkFn = struct {
             fn f(value: u21, allocator: std.mem.Allocator) ShrinkIter(u21) {
-                const state = allocator.create(shrink.IntShrinkState(u21)) catch return ShrinkIter(u21).empty();
-                state.* = shrink.IntShrinkState(u21).init(value);
-                return state.iter();
+                // Wrap IntShrinkState to skip surrogate code points (U+D800..U+DFFF)
+                const State = struct {
+                    inner: shrink.IntShrinkState(u21),
+
+                    fn nextValid(self: *@This()) ?u21 {
+                        while (self.inner.next()) |cp| {
+                            if (cp >= 0xD800 and cp <= 0xDFFF) continue;
+                            return cp;
+                        }
+                        return null;
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?u21 {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.nextValid();
+                    }
+                };
+                const state = allocator.create(State) catch return ShrinkIter(u21).empty();
+                state.* = .{ .inner = shrink.IntShrinkState(u21).init(value) };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.typeErasedNext,
+                };
             }
         }.f,
     };
@@ -523,6 +543,8 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
 
 /// Transform generated values: Gen(A) -> Gen(B) via a comptime-known function.
 /// Shrinks by applying the mapping to the inner generator's shrink candidates.
+/// Transform generator output. WARNING: shrinking is disabled because `f`
+/// is not invertible. Use `shrinkMap` instead if you need shrink support.
 pub fn map(
     comptime A: type,
     comptime B: type,
@@ -536,13 +558,9 @@ pub fn map(
             }
         }.gen,
         .shrinkFn = struct {
-            fn shrinkFn(value: B, allocator: std.mem.Allocator) ShrinkIter(B) {
-                // We can't invert f to get the original A, so we can't use
-                // inner's shrinker on value directly. Best-effort: no shrinking.
-                // For proper shrink-through-map, users should use mapWithShrink
-                // or the runner will still shrink at the property level.
-                _ = value;
-                _ = allocator;
+            fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
+                // f is not invertible, so we can't recover the original A to
+                // feed to inner's shrinker. Use shrinkMap for shrink support.
                 return ShrinkIter(B).empty();
             }
         }.shrinkFn,
@@ -898,6 +916,8 @@ pub fn sampleWith(comptime T: type, gen: Gen(T), n: usize, seed: u64, allocator:
 ///
 /// Note: Shrinking only applies to the B value. The A value used to select
 /// the generator is not shrunk (this would require re-running the generation).
+/// Monadic bind for dependent generation. WARNING: shrinking is disabled
+/// because the generator chosen by `f` is not recoverable from a B value.
 pub fn flatMap(
     comptime A: type,
     comptime B: type,
@@ -914,7 +934,7 @@ pub fn flatMap(
         }.gen,
         .shrinkFn = struct {
             fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
-                // Can't shrink effectively without knowing which gen_b was used
+                // Can't shrink: we don't know which gen_b produced this value.
                 return ShrinkIter(B).empty();
             }
         }.shrinkFn,
@@ -1560,6 +1580,18 @@ test "unicodeChar: produces valid code points" {
         try std.testing.expect(cp <= 0x10FFFF);
         // Not a surrogate
         try std.testing.expect(cp < 0xD800 or cp > 0xDFFF);
+    }
+}
+
+test "unicodeChar: shrinker never emits surrogates" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = unicodeChar();
+    // Shrink a high code point -- binary search will pass through surrogate range
+    var si = g.shrink(0x10000, arena_state.allocator());
+    while (si.next()) |cp| {
+        try std.testing.expect(cp < 0xD800 or cp > 0xDFFF);
+        try std.testing.expect(cp <= 0x10FFFF);
     }
 }
 

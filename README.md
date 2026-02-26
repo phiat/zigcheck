@@ -67,7 +67,7 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 |---|---|---|
 | `generators.int(T)` | `Gen(T)` | Full-range integer |
 | `generators.intRange(T, min, max)` | `Gen(T)` | Integer in `[min, max]` |
-| `generators.float(T)` | `Gen(T)` | Float in `[0, 1)` |
+| `generators.float(T)` | `Gen(T)` | Full-range finite float |
 | `generators.boolean()` | `Gen(bool)` | `true` or `false` |
 | `generators.byte()` | `Gen(u8)` | Single byte (alias for `int(u8)`) |
 
@@ -86,15 +86,10 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 | `unicodeChar()` | `Gen(u21)` | Random Unicode code point (excludes surrogates) |
 | `unicodeString(max_cps)` | `Gen([]const u8)` | Valid UTF-8 string up to `max_cps` code points |
 
-Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. Use `config.allocator` to provide a non-leak-detecting allocator when testing with slice/string generators:
+Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed:
 
 ```zig
-var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-defer arena.deinit();
-
-try zcheck.forAllWith(.{
-    .allocator = arena.allocator(),
-}, []const u8, zcheck.asciiString(50), struct {
+try zcheck.forAll([]const u8, zcheck.asciiString(50), struct {
     fn prop(s: []const u8) !void {
         // test your parser, serializer, etc.
         _ = s;
@@ -124,9 +119,9 @@ const g = zcheck.auto(Point);
 | `element(T, choices)` | `Gen(T)` | Picks from a fixed list |
 | `oneOf(T, gens)` | `Gen(T)` | Picks from multiple generators |
 | `frequency(T, weighted)` | `Gen(T)` | Weighted choice from `{weight, gen}` pairs |
-| `map(A, B, gen, fn)` | `Gen(B)` | Transform output type |
+| `map(A, B, gen, fn)` | `Gen(B)` | Transform output type (no shrinking; use `shrinkMap`) |
 | `filter(T, gen, pred)` | `Gen(T)` | Retry until predicate holds |
-| `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation |
+| `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation (no shrinking) |
 | `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
 | `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
 
@@ -161,8 +156,9 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | Type | Strategy |
 |---|---|
 | Integer | Binary search toward zero; try sign flip for negatives |
+| `intRange` | Binary search toward `min`, clamped to `[min, max]` |
 | Bool | `true` shrinks to `false` |
-| Float | Yield `0.0`, then halve toward zero |
+| Float | Yield `0.0`, then halve toward zero (handles NaN/Inf) |
 | Enum | Yield variants with lower declaration index |
 | Struct | Shrink each field independently |
 | Slice | Shorter prefixes first, then shrink individual elements |
@@ -245,7 +241,7 @@ try zcheck.forAllWith(.{
 }, i32, gen, property);
 ```
 
-Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. Use `.allocator` to control memory for generated values -- required for slice/string generators to avoid leak-detection false positives (see [Slices and strings](#slices-and-strings)). Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
+Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
 
 ## API
 
