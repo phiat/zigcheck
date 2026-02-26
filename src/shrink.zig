@@ -175,7 +175,8 @@ pub fn FloatShrinkState(comptime T: type) type {
         done: bool,
 
         pub fn init(value: T) Self {
-            if (value == 0.0) {
+            // NaN, infinity, and zero have no meaningful shrink candidates
+            if (value == 0.0 or !std.math.isFinite(value) or std.math.isNan(value)) {
                 return .{
                     .target = value,
                     .current = 0.0,
@@ -202,8 +203,8 @@ pub fn FloatShrinkState(comptime T: type) type {
             // Halve toward zero
             self.current = self.current / 2.0;
 
-            // Stop when we're very close to zero
-            if (@abs(self.current) < @as(T, 1e-10)) {
+            // Stop when we hit zero or reach the smallest normal value for this type
+            if (self.current == 0.0 or @abs(self.current) < std.math.floatMin(T)) {
                 self.done = true;
                 return null;
             }
@@ -297,4 +298,34 @@ test "float shrink: produces halving candidates" {
     _ = si.next(); // skip 0.0
     try std.testing.expectEqual(@as(f64, 0.5), si.next().?);
     try std.testing.expectEqual(@as(f64, 0.25), si.next().?);
+}
+
+test "float shrink: NaN produces no candidates" {
+    var state = FloatShrinkState(f64).init(std.math.nan(f64));
+    var si = state.iter();
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "float shrink: infinity produces no candidates" {
+    var state = FloatShrinkState(f64).init(std.math.inf(f64));
+    var si = state.iter();
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "float shrink: negative infinity produces no candidates" {
+    var state = FloatShrinkState(f64).init(-std.math.inf(f64));
+    var si = state.iter();
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "float shrink: f16 terminates" {
+    var state = FloatShrinkState(f16).init(@as(f16, 1.0));
+    var si = state.iter();
+    var count: usize = 0;
+    while (si.next()) |_| {
+        count += 1;
+        if (count > 100) return error.TestUnexpectedResult; // should terminate well before this
+    }
+    try std.testing.expect(count > 0);
+    try std.testing.expect(count < 50);
 }

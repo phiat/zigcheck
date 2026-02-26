@@ -40,10 +40,31 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
         }.f,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                // Shrink toward min using int shrinker, then clamp
-                const state = allocator.create(shrink.IntShrinkState(T)) catch return ShrinkIter(T).empty();
-                state.* = shrink.IntShrinkState(T).init(value);
-                return state.iter();
+                // Shrink toward min by shifting into [0, max-min] space,
+                // shrinking there, then shifting back. All candidates are
+                // guaranteed to be in [min, max].
+                const RangeShrinkState = struct {
+                    inner: shrink.IntShrinkState(T),
+
+                    fn nextClamped(self: *@This()) ?T {
+                        while (self.inner.next()) |raw| {
+                            const shifted = raw +% min;
+                            if (shifted >= min and shifted <= max) return shifted;
+                        }
+                        return null;
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.nextClamped();
+                    }
+                };
+                const state = allocator.create(RangeShrinkState) catch return ShrinkIter(T).empty();
+                state.* = .{ .inner = shrink.IntShrinkState(T).init(value -% min) };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = RangeShrinkState.typeErasedNext,
+                };
             }
         }.f,
     };
@@ -73,14 +94,22 @@ pub fn byte() Gen(u8) {
 }
 
 /// Generator for floating point types (f16, f32, f64).
+/// Produces the full range of finite float values including negatives.
+/// Does not produce NaN or infinity (use floatAny for those).
 pub fn float(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .float) @compileError("float() requires a float type, got " ++ @typeName(T));
     }
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
     return .{
         .genFn = struct {
             fn f(rng: std.Random, _: std.mem.Allocator) T {
-                return rng.float(T);
+                // Generate full-range finite floats via random bit patterns,
+                // re-rolling NaN and infinity to keep values finite.
+                while (true) {
+                    const result: T = @bitCast(rng.int(Bits));
+                    if (std.math.isFinite(result)) return result;
+                }
             }
         }.f,
         .shrinkFn = struct {
@@ -288,8 +317,74 @@ pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
         }.gen,
         .shrinkFn = struct {
             fn f(value: []const u8, allocator: std.mem.Allocator) ShrinkIter([]const u8) {
-                // Reuse slice shrinker for the byte representation
-                return slice(u8, int(u8), max_codepoints * 4).shrinkFn(value, allocator);
+                // Shrink at codepoint level to preserve UTF-8 validity.
+                // Decode to codepoints, try shorter prefixes, then re-encode.
+                const State = struct {
+                    codepoints: []u21,
+                    original_bytes: []const u8,
+                    alloc: std.mem.Allocator,
+                    next_len: usize, // shorter prefix phase
+                    done: bool,
+
+                    fn nextImpl(self: *@This()) ?[]const u8 {
+                        if (self.done) return null;
+
+                        // Try shorter codepoint prefixes
+                        if (self.next_len < self.codepoints.len) {
+                            const len = self.next_len;
+                            self.next_len += 1;
+                            return self.encode(self.codepoints[0..len]);
+                        }
+                        self.done = true;
+                        return null;
+                    }
+
+                    fn encode(self: *@This(), cps: []const u21) ?[]const u8 {
+                        // Worst case 4 bytes per codepoint
+                        var buf = self.alloc.alloc(u8, cps.len * 4) catch return null;
+                        var pos: usize = 0;
+                        for (cps) |cp| {
+                            const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
+                            if (pos + cp_len > buf.len) break;
+                            _ = std.unicode.utf8Encode(cp, buf[pos..]) catch continue;
+                            pos += cp_len;
+                        }
+                        return buf[0..pos];
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?[]const u8 {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.nextImpl();
+                    }
+                };
+
+                // Decode UTF-8 to codepoints
+                const view = std.unicode.Utf8View.init(value) catch return ShrinkIter([]const u8).empty();
+                var cp_iter = view.iterator();
+                var count: usize = 0;
+                while (cp_iter.nextCodepoint()) |_| count += 1;
+
+                if (count == 0) return ShrinkIter([]const u8).empty();
+
+                const cps = allocator.alloc(u21, count) catch return ShrinkIter([]const u8).empty();
+                var cp_iter2 = view.iterator();
+                var i: usize = 0;
+                while (cp_iter2.nextCodepoint()) |cp| : (i += 1) {
+                    cps[i] = cp;
+                }
+
+                const state = allocator.create(State) catch return ShrinkIter([]const u8).empty();
+                state.* = .{
+                    .codepoints = cps,
+                    .original_bytes = value,
+                    .alloc = allocator,
+                    .next_len = 0,
+                    .done = false,
+                };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.typeErasedNext,
+                };
             }
         }.f,
     };
@@ -704,7 +799,47 @@ pub fn orderedList(comptime T: type, comptime inner: Gen(T), comptime max_len: u
                 return buf;
             }
         }.gen,
-        .shrinkFn = slice(T, inner, max_len).shrinkFn,
+        .shrinkFn = struct {
+            fn f(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
+                // Wrap the slice shrinker and re-sort each candidate to maintain
+                // the sorted invariant.
+                const State = struct {
+                    inner_iter: ShrinkIter([]const T),
+                    alloc: std.mem.Allocator,
+
+                    fn nextSorted(self: *@This()) ?[]const T {
+                        while (self.inner_iter.next()) |candidate| {
+                            // Make a mutable copy to sort
+                            const buf = self.alloc.alloc(T, candidate.len) catch return null;
+                            @memcpy(buf, candidate);
+                            std.mem.sort(T, buf, {}, struct {
+                                fn lessThan(_: void, a: T, b: T) bool {
+                                    return a < b;
+                                }
+                            }.lessThan);
+                            return buf;
+                        }
+                        return null;
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?[]const T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.nextSorted();
+                    }
+                };
+
+                const inner_iter = slice(T, inner, max_len).shrinkFn(value, allocator);
+                const state = allocator.create(State) catch return ShrinkIter([]const T).empty();
+                state.* = .{
+                    .inner_iter = inner_iter,
+                    .alloc = allocator,
+                };
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = State.typeErasedNext,
+                };
+            }
+        }.f,
     };
 }
 
@@ -973,6 +1108,38 @@ test "intRange: produces values in [10, 20]" {
     }
 }
 
+test "intRange: shrinker stays within [min, max]" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(u32, 10, 20);
+    var si = g.shrink(15, arena_state.allocator());
+    while (si.next()) |v| {
+        try std.testing.expect(v >= 10);
+        try std.testing.expect(v <= 20);
+    }
+}
+
+test "intRange: shrinker first candidate is min" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(u32, 10, 20);
+    var si = g.shrink(15, arena_state.allocator());
+    const first = si.next();
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(u32, 10), first.?);
+}
+
+test "intRange: signed range shrinker stays within bounds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(i32, -5, 5);
+    var si = g.shrink(3, arena_state.allocator());
+    while (si.next()) |v| {
+        try std.testing.expect(v >= -5);
+        try std.testing.expect(v <= 5);
+    }
+}
+
 test "boolean generator produces both values" {
     var prng = std.Random.DefaultPrng.init(99);
     const g = boolean();
@@ -986,13 +1153,20 @@ test "boolean generator produces both values" {
     try std.testing.expect(seen_false);
 }
 
-test "float generator produces values in [0, 1)" {
+test "float generator produces finite full-range values" {
     var prng = std.Random.DefaultPrng.init(77);
     const g = float(f64);
-    for (0..100) |_| {
+    var seen_negative = false;
+    var seen_gt_one = false;
+    for (0..200) |_| {
         const v = g.generate(prng.random(), std.testing.allocator);
-        try std.testing.expect(v >= 0.0 and v < 1.0);
+        try std.testing.expect(std.math.isFinite(v));
+        if (v < 0.0) seen_negative = true;
+        if (v > 1.0) seen_gt_one = true;
     }
+    // Full-range generator should produce values outside [0,1)
+    try std.testing.expect(seen_negative);
+    try std.testing.expect(seen_gt_one);
 }
 
 test "enum generator produces all variants" {
@@ -1314,6 +1488,25 @@ test "orderedList: produces sorted output" {
                 try std.testing.expect(result[i] <= result[i + 1]);
             }
         }
+    }
+}
+
+test "orderedList: shrink candidates are sorted" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = orderedList(u32, int(u32), 10);
+    const input = &[_]u32{ 3, 7, 15, 42 };
+    var si = g.shrink(input, arena_state.allocator());
+    var count: usize = 0;
+    while (si.next()) |candidate| {
+        // Every shrink candidate must be sorted
+        if (candidate.len > 1) {
+            for (0..candidate.len - 1) |i| {
+                try std.testing.expect(candidate[i] <= candidate[i + 1]);
+            }
+        }
+        count += 1;
+        if (count > 50) break; // don't exhaust all candidates
     }
 }
 
