@@ -566,34 +566,46 @@ fn doShrink2(
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
 
-    for (0..max_shrinks) |_| {
-        var improved = false;
+    // Repeat coordinate descent rounds until a full round makes no progress
+    // across all dimensions, avoiding local minima from serial single-pass.
+    while (steps < max_shrinks) {
+        var round_improved = false;
 
-        // Try shrinking A while holding B constant
-        var iter_a = gen_a.shrink(best_a, arena_state.allocator());
-        while (iter_a.next()) |candidate| {
-            if (property(candidate, best_b)) |_| {} else |err| {
-                if (err == TestDiscarded) continue;
-                best_a = candidate;
-                steps += 1;
-                improved = true;
-                break;
+        // Shrink A as far as possible while holding B constant
+        while (steps < max_shrinks) {
+            var iter_a = gen_a.shrink(best_a, arena_state.allocator());
+            var improved_a = false;
+            while (iter_a.next()) |candidate| {
+                if (property(candidate, best_b)) |_| {} else |err| {
+                    if (err == TestDiscarded) continue;
+                    best_a = candidate;
+                    steps += 1;
+                    improved_a = true;
+                    round_improved = true;
+                    break;
+                }
             }
+            if (!improved_a) break;
         }
 
-        // Try shrinking B while holding A constant
-        var iter_b = gen_b.shrink(best_b, arena_state.allocator());
-        while (iter_b.next()) |candidate| {
-            if (property(best_a, candidate)) |_| {} else |err| {
-                if (err == TestDiscarded) continue;
-                best_b = candidate;
-                steps += 1;
-                improved = true;
-                break;
+        // Shrink B as far as possible while holding A constant
+        while (steps < max_shrinks) {
+            var iter_b = gen_b.shrink(best_b, arena_state.allocator());
+            var improved_b = false;
+            while (iter_b.next()) |candidate| {
+                if (property(best_a, candidate)) |_| {} else |err| {
+                    if (err == TestDiscarded) continue;
+                    best_b = candidate;
+                    steps += 1;
+                    improved_b = true;
+                    round_improved = true;
+                    break;
+                }
             }
+            if (!improved_b) break;
         }
 
-        if (!improved) break;
+        if (!round_improved) break;
     }
 
     return .{ .a = best_a, .b = best_b, .steps = steps };
@@ -759,43 +771,62 @@ fn doShrink3(
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
 
-    for (0..max_shrinks) |_| {
-        var improved = false;
+    // Repeat coordinate descent rounds until a full round makes no progress.
+    while (steps < max_shrinks) {
+        var round_improved = false;
 
-        var iter_a = gen_a.shrink(best_a, arena_state.allocator());
-        while (iter_a.next()) |candidate| {
-            if (property(candidate, best_b, best_c)) |_| {} else |err| {
-                if (err == TestDiscarded) continue;
-                best_a = candidate;
-                steps += 1;
-                improved = true;
-                break;
+        // Shrink A as far as possible
+        while (steps < max_shrinks) {
+            var iter_a = gen_a.shrink(best_a, arena_state.allocator());
+            var improved_a = false;
+            while (iter_a.next()) |candidate| {
+                if (property(candidate, best_b, best_c)) |_| {} else |err| {
+                    if (err == TestDiscarded) continue;
+                    best_a = candidate;
+                    steps += 1;
+                    improved_a = true;
+                    round_improved = true;
+                    break;
+                }
             }
+            if (!improved_a) break;
         }
 
-        var iter_b = gen_b.shrink(best_b, arena_state.allocator());
-        while (iter_b.next()) |candidate| {
-            if (property(best_a, candidate, best_c)) |_| {} else |err| {
-                if (err == TestDiscarded) continue;
-                best_b = candidate;
-                steps += 1;
-                improved = true;
-                break;
+        // Shrink B as far as possible
+        while (steps < max_shrinks) {
+            var iter_b = gen_b.shrink(best_b, arena_state.allocator());
+            var improved_b = false;
+            while (iter_b.next()) |candidate| {
+                if (property(best_a, candidate, best_c)) |_| {} else |err| {
+                    if (err == TestDiscarded) continue;
+                    best_b = candidate;
+                    steps += 1;
+                    improved_b = true;
+                    round_improved = true;
+                    break;
+                }
             }
+            if (!improved_b) break;
         }
 
-        var iter_c = gen_c.shrink(best_c, arena_state.allocator());
-        while (iter_c.next()) |candidate| {
-            if (property(best_a, best_b, candidate)) |_| {} else |err| {
-                if (err == TestDiscarded) continue;
-                best_c = candidate;
-                steps += 1;
-                improved = true;
-                break;
+        // Shrink C as far as possible
+        while (steps < max_shrinks) {
+            var iter_c = gen_c.shrink(best_c, arena_state.allocator());
+            var improved_c = false;
+            while (iter_c.next()) |candidate| {
+                if (property(best_a, best_b, candidate)) |_| {} else |err| {
+                    if (err == TestDiscarded) continue;
+                    best_c = candidate;
+                    steps += 1;
+                    improved_c = true;
+                    round_improved = true;
+                    break;
+                }
             }
+            if (!improved_c) break;
         }
 
-        if (!improved) break;
+        if (!round_improved) break;
     }
 
     return .{ .a = best_a, .b = best_b, .c = best_c, .steps = steps };

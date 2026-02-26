@@ -160,25 +160,43 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
             fn shrinkFn(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
                 if (value.len <= min_len) return ShrinkIter([]const T).empty();
 
+                // Shrink phases:
+                //  1. Shorter prefixes (length min_len..original.len-1)
+                //  2. Delete one element at each position
+                //  3. Shrink individual elements in place
+                const Phase = enum { prefixes, deletions, elements };
+
                 const State = struct {
                     original: []const T,
                     alloc: std.mem.Allocator,
-                    shrinking_elements: bool,
+                    phase: Phase,
                     // Shorter-prefix phase: next length to try
                     next_len: usize,
+                    // Delete-one phase: index of element to delete next
+                    delete_idx: usize,
                     // Element-shrink phase: position and current element's shrinker
                     elem_idx: usize,
                     elem_shrinker: ShrinkIter(T),
 
                     fn nextImpl(self: *@This()) ?[]const T {
-                        if (!self.shrinking_elements) {
-                            if (self.tryShorter()) |result| return result;
-                            // Transition to element shrinking
-                            self.shrinking_elements = true;
-                            self.elem_idx = 0;
-                            self.startElementShrinker();
+                        switch (self.phase) {
+                            .prefixes => {
+                                if (self.tryShorter()) |result| return result;
+                                self.phase = .deletions;
+                                self.delete_idx = 0;
+                                return self.nextImpl();
+                            },
+                            .deletions => {
+                                if (self.tryDeleteOne()) |result| return result;
+                                self.phase = .elements;
+                                self.elem_idx = 0;
+                                self.startElementShrinker();
+                                return self.nextImpl();
+                            },
+                            .elements => {
+                                return self.tryShrinkElement();
+                            },
                         }
-                        return self.tryShrinkElement();
                     }
 
                     /// Yield the next shorter prefix, or null when exhausted.
@@ -187,6 +205,17 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                             const len = self.next_len;
                             self.next_len += 1;
                             return self.copyPrefix(len);
+                        }
+                        return null;
+                    }
+
+                    /// Yield the original with element at delete_idx removed.
+                    fn tryDeleteOne(self: *@This()) ?[]const T {
+                        if (self.original.len <= min_len) return null;
+                        while (self.delete_idx < self.original.len) {
+                            const idx = self.delete_idx;
+                            self.delete_idx += 1;
+                            return self.copyWithout(idx);
                         }
                         return null;
                     }
@@ -206,6 +235,18 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                     fn copyPrefix(self: *@This(), len: usize) ?[]const T {
                         const result = self.alloc.alloc(T, len) catch return null;
                         if (len > 0) @memcpy(result, self.original[0..len]);
+                        return result;
+                    }
+
+                    fn copyWithout(self: *@This(), skip_idx: usize) ?[]const T {
+                        const new_len = self.original.len - 1;
+                        const result = self.alloc.alloc(T, new_len) catch return null;
+                        var out: usize = 0;
+                        for (0..self.original.len) |i| {
+                            if (i == skip_idx) continue;
+                            result[out] = self.original[i];
+                            out += 1;
+                        }
                         return result;
                     }
 
@@ -232,8 +273,9 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                 state.* = .{
                     .original = value,
                     .alloc = allocator,
-                    .shrinking_elements = false,
+                    .phase = .prefixes,
                     .next_len = min_len,
+                    .delete_idx = 0,
                     .elem_idx = 0,
                     .elem_shrinker = ShrinkIter(T).empty(),
                 };
@@ -709,7 +751,10 @@ pub fn shrinkMap(
                 const State = struct {
                     a_iter: *ShrinkIter(A),
                 };
-                const state = allocator.create(State) catch return ShrinkIter(B).empty();
+                const state = allocator.create(State) catch {
+                    allocator.destroy(inner_iter);
+                    return ShrinkIter(B).empty();
+                };
                 state.* = .{ .a_iter = inner_iter };
 
                 return .{
@@ -780,11 +825,13 @@ pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
             }
 
             fn int_or_element(comptime U: type) Gen(U) {
-                // Dummy -- we only need the shrinker from sliceRange, not genFn
+                // Dummy generator -- only the shrinker is used by sliceRange.
+                // genFn returns a zero value instead of unreachable to avoid
+                // a safety landmine if accidentally called.
                 return .{
                     .genFn = struct {
                         fn f(_: std.Random, _: std.mem.Allocator) U {
-                            unreachable;
+                            return std.mem.zeroes(U);
                         }
                     }.f,
                     .shrinkFn = struct {
@@ -1675,7 +1722,7 @@ test "slice shrink: first candidate is empty" {
     try std.testing.expectEqual(@as(usize, 0), first.len);
 }
 
-test "slice shrink: tries shorter then element-wise" {
+test "slice shrink: tries shorter, then deletions, then element-wise" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const g = slice(u8, int(u8), 10);
@@ -1689,7 +1736,15 @@ test "slice shrink: tries shorter then element-wise" {
     try std.testing.expectEqual(@as(usize, 1), len1.len);
     try std.testing.expectEqual(@as(u8, 100), len1[0]);
 
-    // Phase 1: shrink elements -- first element shrunk (int shrink: 100 -> 0)
+    // Phase 1: delete one element -- remove [0] then [1]
+    const del0 = si.next().?;
+    try std.testing.expectEqual(@as(usize, 1), del0.len);
+    try std.testing.expectEqual(@as(u8, 200), del0[0]); // removed first element
+    const del1 = si.next().?;
+    try std.testing.expectEqual(@as(usize, 1), del1.len);
+    try std.testing.expectEqual(@as(u8, 100), del1[0]); // removed second element
+
+    // Phase 2: shrink elements -- first element shrunk (int shrink: 100 -> 0)
     const shrunk_elem = si.next().?;
     try std.testing.expectEqual(@as(usize, 2), shrunk_elem.len);
     try std.testing.expectEqual(@as(u8, 0), shrunk_elem[0]); // 100 shrunk to 0
