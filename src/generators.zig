@@ -82,6 +82,201 @@ pub fn float(comptime T: type) Gen(T) {
     };
 }
 
+// ── Combinators ──────────────────────────────────────────────────────
+
+/// Always produces the same value. Shrinks to nothing.
+pub fn constant(comptime T: type, comptime value: T) Gen(T) {
+    return .{
+        .genFn = struct {
+            fn f(_: std.Random, _: std.mem.Allocator) T {
+                return value;
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(_: T, _: std.mem.Allocator) ShrinkIter(T) {
+                return ShrinkIter(T).empty();
+            }
+        }.f,
+    };
+}
+
+/// Pick uniformly from a comptime-known list of values.
+/// Shrinks toward earlier elements in the list.
+pub fn element(comptime T: type, comptime choices: []const T) Gen(T) {
+    comptime {
+        if (choices.len == 0) @compileError("element() requires at least one choice");
+    }
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, _: std.mem.Allocator) T {
+                const idx = rng.intRangeAtMost(usize, 0, choices.len - 1);
+                return choices[idx];
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // Find position of current value; shrink to earlier elements
+                var current_pos: usize = choices.len;
+                for (choices, 0..) |c, i| {
+                    if (std.meta.eql(c, value)) {
+                        current_pos = i;
+                        break;
+                    }
+                }
+                if (current_pos == 0 or current_pos == choices.len) return ShrinkIter(T).empty();
+
+                const candidates = allocator.alloc(T, current_pos) catch return ShrinkIter(T).empty();
+                for (choices[0..current_pos], 0..) |c, i| {
+                    candidates[i] = c;
+                }
+
+                const State = struct {
+                    items: []const T,
+                    pos: usize,
+                };
+                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                state.* = .{ .items = candidates, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?T {
+                            const s: *State = @ptrCast(@alignCast(ctx));
+                            if (s.pos >= s.items.len) return null;
+                            const val = s.items[s.pos];
+                            s.pos += 1;
+                            return val;
+                        }
+                    }.next,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Pick from one of several generators uniformly at random.
+/// Shrinks using the selected generator's shrinker, then tries earlier generators.
+pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
+    comptime {
+        if (gens.len == 0) @compileError("oneOf() requires at least one generator");
+        if (gens.len == 1) return gens[0];
+    }
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, allocator: std.mem.Allocator) T {
+                const idx = rng.intRangeAtMost(usize, 0, gens.len - 1);
+                inline for (gens, 0..) |g, i| {
+                    if (idx == i) return g.generate(rng, allocator);
+                }
+                unreachable;
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // We don't know which generator produced the value, so try
+                // all generators' shrinkers. This over-shrinks but is correct.
+                const iters = allocator.alloc(ShrinkIter(T), gens.len) catch return ShrinkIter(T).empty();
+                inline for (gens, 0..) |g, i| {
+                    iters[i] = g.shrink(value, allocator);
+                }
+
+                const State = struct {
+                    iters_arr: []ShrinkIter(T),
+                    pos: usize,
+                };
+                const state = allocator.create(State) catch return ShrinkIter(T).empty();
+                state.* = .{ .iters_arr = iters, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?T {
+                            const s: *State = @ptrCast(@alignCast(ctx));
+                            while (s.pos < s.iters_arr.len) {
+                                if (s.iters_arr[s.pos].next()) |val| {
+                                    return val;
+                                }
+                                s.pos += 1;
+                            }
+                            return null;
+                        }
+                    }.next,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Transform generated values: Gen(A) -> Gen(B) via a comptime-known function.
+/// Shrinks by applying the mapping to the inner generator's shrink candidates.
+pub fn map(
+    comptime A: type,
+    comptime B: type,
+    comptime inner: Gen(A),
+    comptime f: *const fn (A) B,
+) Gen(B) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) B {
+                return f(inner.generate(rng, allocator));
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: B, allocator: std.mem.Allocator) ShrinkIter(B) {
+                // We can't invert f to get the original A, so we can't use
+                // inner's shrinker on value directly. Best-effort: no shrinking.
+                // For proper shrink-through-map, users should use mapWithShrink
+                // or the runner will still shrink at the property level.
+                _ = value;
+                _ = allocator;
+                return ShrinkIter(B).empty();
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Filter generated values. Retries up to 1000 times to find a value that
+/// satisfies the predicate. If no value is found, returns the last generated value.
+pub fn filter(
+    comptime T: type,
+    comptime inner: Gen(T),
+    comptime pred: *const fn (T) bool,
+) Gen(T) {
+    const max_retries = 1000;
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+                for (0..max_retries) |_| {
+                    const val = inner.generate(rng, allocator);
+                    if (pred(val)) return val;
+                }
+                // Last resort: return whatever we got
+                return inner.generate(rng, allocator);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // Wrap inner's shrinker but skip candidates that don't pass the predicate
+                const inner_iter = allocator.create(ShrinkIter(T)) catch return ShrinkIter(T).empty();
+                inner_iter.* = inner.shrink(value, allocator);
+
+                return .{
+                    .context = @ptrCast(inner_iter),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?T {
+                            const iter: *ShrinkIter(T) = @ptrCast(@alignCast(ctx));
+                            while (iter.next()) |candidate| {
+                                if (pred(candidate)) return candidate;
+                            }
+                            return null;
+                        }
+                    }.next,
+                };
+            }
+        }.shrinkFn,
+    };
+}
+
 /// Auto-derive a generator for any supported type via comptime reflection.
 pub fn auto(comptime T: type) Gen(T) {
     return switch (@typeInfo(T)) {
@@ -362,4 +557,120 @@ test "struct shrink: first candidate shrinks first field" {
     // First candidate: x shrunk to 0, y unchanged
     try std.testing.expectEqual(@as(i32, 0), first.x);
     try std.testing.expectEqual(@as(i32, -50), first.y);
+}
+
+// ── Combinator tests ─────────────────────────────────────────────────
+
+test "constant: always produces the same value" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = constant(u32, 7);
+    for (0..50) |_| {
+        try std.testing.expectEqual(@as(u32, 7), g.generate(prng.random(), std.testing.allocator));
+    }
+}
+
+test "element: picks from choices" {
+    const choices = [_]u8{ 10, 20, 30 };
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = element(u8, &choices);
+    var seen = [_]bool{ false, false, false };
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        if (v == 10) seen[0] = true;
+        if (v == 20) seen[1] = true;
+        if (v == 30) seen[2] = true;
+    }
+    for (seen) |s| try std.testing.expect(s);
+}
+
+test "element: shrinks toward earlier elements" {
+    const choices = [_]u8{ 10, 20, 30 };
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = element(u8, &choices);
+    var si = g.shrink(30, arena_state.allocator());
+    try std.testing.expectEqual(@as(u8, 10), si.next().?);
+    try std.testing.expectEqual(@as(u8, 20), si.next().?);
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "element: first element has no shrinks" {
+    const choices = [_]u8{ 10, 20, 30 };
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = element(u8, &choices);
+    var si = g.shrink(10, arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "oneOf: picks from multiple generators" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime oneOf(u32, &.{
+        constant(u32, 1),
+        constant(u32, 2),
+        constant(u32, 3),
+    });
+    var seen = [_]bool{ false, false, false };
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        if (v == 1) seen[0] = true;
+        if (v == 2) seen[1] = true;
+        if (v == 3) seen[2] = true;
+    }
+    for (seen) |s| try std.testing.expect(s);
+}
+
+test "map: transforms values" {
+    const g = map(u32, u64, int(u32), struct {
+        fn f(x: u32) u64 {
+            return @as(u64, x) * 2;
+        }
+    }.f);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        try std.testing.expect(v % 2 == 0); // always even
+    }
+}
+
+test "filter: only produces values satisfying predicate" {
+    const g = filter(i32, int(i32), struct {
+        fn pred(n: i32) bool {
+            return n > 0;
+        }
+    }.pred);
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        try std.testing.expect(v > 0);
+    }
+}
+
+test "filter: shrinks respect predicate" {
+    const g = filter(i32, int(i32), struct {
+        fn pred(n: i32) bool {
+            return n >= 0;
+        }
+    }.pred);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var si = g.shrink(100, arena_state.allocator());
+    // First candidate from int shrinker is 0, which passes pred (>= 0)
+    try std.testing.expectEqual(@as(i32, 0), si.next().?);
+}
+
+test "filter: shrinks skip values failing predicate" {
+    // Filter for even numbers only
+    const g = filter(i32, int(i32), struct {
+        fn pred(n: i32) bool {
+            return @mod(n, 2) == 0;
+        }
+    }.pred);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var si = g.shrink(100, arena_state.allocator());
+    // All shrink candidates must be even
+    while (si.next()) |candidate| {
+        try std.testing.expect(@mod(candidate, 2) == 0);
+    }
 }

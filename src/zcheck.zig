@@ -28,6 +28,14 @@ pub const forAll = runner.forAll;
 /// Auto-derive a generator for any supported type via comptime reflection.
 pub const auto = generators.auto;
 
+// ── Combinators ──────────────────────────────────────────────────────
+
+pub const constant = generators.constant;
+pub const element = generators.element;
+pub const oneOf = generators.oneOf;
+pub const map = generators.map;
+pub const filter = generators.filter;
+
 // ── Tests (pull in all modules for `zig build test`) ────────────────────
 
 test {
