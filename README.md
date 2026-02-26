@@ -295,6 +295,10 @@ src/
   runner.zig       # forAll/check engine with shrink loop
 ```
 
+## Built with
+
+Project management powered by [beads](https://github.com/steveyegge/beads) -- git-backed issue tracking for AI-assisted development.
+
 ## License
 
 MIT
