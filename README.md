@@ -26,7 +26,8 @@ When a property fails, zcheck automatically shrinks the counterexample to a mini
 
 ```
 ━━━ zcheck: FAILED after 3 tests ━━━━━━━━━━━━━━━━━━━━━━
-  Shrunk (12 steps)
+  Counterexample: 10
+  Shrunk (12 steps) from: 1847382901
   Reproduction seed: 0x2a
   Rerun with: .seed = 0x2a
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -144,7 +145,7 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | `element` | Shrink toward earlier elements in the list |
 | `filter` | Inner shrinker, filtered by predicate |
 
-The runner uses an arena allocator that resets each shrink iteration, so shrink state is automatically cleaned up with zero manual `deinit` calls.
+The runner uses an arena allocator for shrink state, freed in bulk when shrinking completes.
 
 ## Configuration
 
@@ -154,10 +155,11 @@ try zcheck.forAllWith(.{
     .max_shrinks = 2000,   // default: 1000
     .seed = 0x2a,          // default: null (time-based)
     .verbose = true,       // default: false
+    .allocator = my_alloc, // default: std.testing.allocator
 }, i32, gen, property);
 ```
 
-Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them.
+Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. Use `.allocator` to control memory for generated values — required for slice/string generators to avoid leak-detection false positives (see [Slices and strings](#slices-and-strings)).
 
 ## API
 
