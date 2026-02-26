@@ -1,4 +1,4 @@
-// Shrink iterators — produce progressively simpler values from a failing input.
+// Shrink iterators -- produce progressively simpler values from a failing input.
 
 const std = @import("std");
 
@@ -16,7 +16,7 @@ pub fn ShrinkIter(comptime T: type) type {
             return self.nextFn(self.context);
         }
 
-        /// Sentinel for empty shrinkers — a valid pointer that is never dereferenced.
+        /// Sentinel for empty shrinkers -- a valid pointer that is never dereferenced.
         var empty_sentinel: u8 = 0;
 
         /// An empty shrinker that yields nothing.
@@ -33,7 +33,7 @@ pub fn ShrinkIter(comptime T: type) type {
     };
 }
 
-// ── Integer shrinking ───────────────────────────────────────────────────
+// -- Integer shrinking ----------------------------------------------------
 
 /// State for binary-search-toward-zero shrinking of integers.
 pub fn IntShrinkState(comptime T: type) type {
@@ -162,7 +162,7 @@ pub const BoolShrinkState = struct {
     }
 };
 
-// ── Float shrinking ──────────────────────────────────────────────────
+// -- Float shrinking ------------------------------------------------------
 
 /// State for float shrinking: yield 0.0 first, then halve toward zero.
 pub fn FloatShrinkState(comptime T: type) type {
@@ -225,7 +225,7 @@ pub fn FloatShrinkState(comptime T: type) type {
     };
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// -- Tests ----------------------------------------------------------------
 
 test "int shrink: 0 produces no candidates" {
     var state = IntShrinkState(i32).init(0);

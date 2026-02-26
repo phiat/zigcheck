@@ -1,4 +1,4 @@
-// Runner — the forAll/check engine that ties generation, testing, and
+// Runner -- the forAll/check engine that ties generation, testing, and
 // shrinking together.
 
 const std = @import("std");
@@ -95,11 +95,11 @@ pub fn expectFailureWith(
         .passed => {
             std.log.err(
                 \\
-                \\━━━ zcheck: expectFailure UNEXPECTED PASS ━━━━━━━━━━━━━━━━
+                \\--- zcheck: expectFailure UNEXPECTED PASS -----------------
                 \\
                 \\  Property passed {d} tests but was expected to fail.
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{config.num_tests});
             return error.ExpectedFailure;
         },
@@ -107,11 +107,11 @@ pub fn expectFailureWith(
         .gave_up => {
             std.log.err(
                 \\
-                \\━━━ zcheck: expectFailure GAVE UP ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: expectFailure GAVE UP -------------------------
                 \\
                 \\  Property gave up after too many discards.
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{});
             return error.GaveUp;
         },
@@ -158,26 +158,26 @@ pub fn forAllWith(
         .failed => |f| {
             std.log.err(
                 \\
-                \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: FAILED after {d} tests ------------------------
                 \\
                 \\  Counterexample: {any}
                 \\  Shrunk ({d} steps) from: {any}
                 \\  Reproduction seed: 0x{x}
                 \\  Rerun with: .seed = 0x{x}
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ f.num_tests_before_fail, f.shrunk, f.shrink_steps, f.original, f.seed, f.seed });
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
             std.log.err(
                 \\
-                \\━━━ zcheck: GAVE UP after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: GAVE UP after {d} tests -----------------------
                 \\
                 \\  Only {d} tests passed before {d} were discarded.
                 \\  Consider using a more targeted generator instead of assume().
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ g.num_tests, g.num_tests, g.num_discarded });
             return error.GaveUp;
         },
@@ -221,7 +221,7 @@ pub fn check(
                 discards += 1;
                 continue;
             }
-            // Property failed — attempt shrinking
+            // Property failed -- attempt shrinking
             const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
 
             return .{ .failed = .{
@@ -271,19 +271,19 @@ fn doShrink(
         while (iter.next()) |candidate| {
             // Does the property still fail with this simpler value?
             if (property(candidate)) |_| {
-                // Property passed — this candidate is too simple
+                // Property passed -- this candidate is too simple
                 if (verbose_shrink) {
                     std.log.info("zcheck shrink: candidate {any} passed (too simple)", .{candidate});
                 }
             } else |err| {
                 // Discarded test cases don't count as failures
                 if (err == TestDiscarded) continue;
-                // Still fails — this is a better (simpler) counterexample
+                // Still fails -- this is a better (simpler) counterexample
                 best = candidate;
                 steps += 1;
                 improved = true;
                 if (verbose_shrink) {
-                    std.log.info("zcheck shrink: step {d} → {any}", .{ steps, candidate });
+                    std.log.info("zcheck shrink: step {d} -> {any}", .{ steps, candidate });
                 }
                 break; // restart shrinking from the new best
             }
@@ -295,7 +295,7 @@ fn doShrink(
     return .{ .value = best, .steps = steps };
 }
 
-// ── Labeled / coverage properties ────────────────────────────────────
+// -- Labeled / coverage properties ----------------------------------------
 
 /// Result from a labeled property: the property either passes, fails, or
 /// discards, and optionally provides one or more labels for coverage tracking.
@@ -381,14 +381,14 @@ pub fn forAllLabeledWith(
             const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
             std.log.err(
                 \\
-                \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: FAILED after {d} tests ------------------------
                 \\
                 \\  Counterexample: {any}
                 \\  Shrunk ({d} steps) from: {any}
                 \\  Reproduction seed: 0x{x}
                 \\  Rerun with: .seed = 0x{x}
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ tests_run + 1, shrunk.value, shrunk.steps, value, seed, seed });
             return error.PropertyFalsified;
         }
@@ -405,7 +405,7 @@ pub fn forAllLabeledWith(
     }
 }
 
-// ── Multi-argument properties ────────────────────────────────────────
+// -- Multi-argument properties --------------------------------------------
 
 pub fn CheckResult2(comptime A: type, comptime B: type) type {
     return union(enum) {
@@ -452,25 +452,25 @@ pub fn forAll2With(
         .failed => |f| {
             std.log.err(
                 \\
-                \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: FAILED after {d} tests ------------------------
                 \\
                 \\  Counterexample: ({any}, {any})
                 \\  Shrunk ({d} steps) from: ({any}, {any})
                 \\  Reproduction seed: 0x{x}
                 \\  Rerun with: .seed = 0x{x}
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ f.num_tests_before_fail, f.shrunk_a, f.shrunk_b, f.shrink_steps, f.original_a, f.original_b, f.seed, f.seed });
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
             std.log.err(
                 \\
-                \\━━━ zcheck: GAVE UP after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: GAVE UP after {d} tests -----------------------
                 \\
                 \\  Only {d} tests passed before {d} were discarded.
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ g.num_tests, g.num_tests, g.num_discarded });
             return error.GaveUp;
         },
@@ -632,25 +632,25 @@ pub fn forAll3With(
         .failed => |f| {
             std.log.err(
                 \\
-                \\━━━ zcheck: FAILED after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: FAILED after {d} tests ------------------------
                 \\
                 \\  Counterexample: ({any}, {any}, {any})
                 \\  Shrunk ({d} steps) from: ({any}, {any}, {any})
                 \\  Reproduction seed: 0x{x}
                 \\  Rerun with: .seed = 0x{x}
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ f.num_tests_before_fail, f.shrunk_a, f.shrunk_b, f.shrunk_c, f.shrink_steps, f.original_a, f.original_b, f.original_c, f.seed, f.seed });
             return error.PropertyFalsified;
         },
         .gave_up => |g| {
             std.log.err(
                 \\
-                \\━━━ zcheck: GAVE UP after {d} tests ━━━━━━━━━━━━━━━━━━━━━━
+                \\--- zcheck: GAVE UP after {d} tests -----------------------
                 \\
                 \\  Only {d} tests passed before {d} were discarded.
                 \\
-                \\━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                \\------------------------------------------------------
             , .{ g.num_tests, g.num_tests, g.num_discarded });
             return error.GaveUp;
         },
@@ -779,7 +779,7 @@ fn doShrink3(
     return .{ .a = best_a, .b = best_b, .c = best_c, .steps = steps };
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// -- Tests ----------------------------------------------------------------
 
 const generators = @import("generators.zig");
 
@@ -904,7 +904,7 @@ test "check: deterministic with same seed" {
     }
 }
 
-// ── assume / discard tests ──────────────────────────────────────────
+// -- assume / discard tests -----------------------------------------------
 
 test "assume: passing condition does nothing" {
     try assume(true);
@@ -967,7 +967,7 @@ test "check: shrinking skips discarded candidates" {
     }
 }
 
-// ── forAll2 / check2 tests ──────────────────────────────────────────
+// -- forAll2 / check2 tests -----------------------------------------------
 
 test "forAll2: passing two-argument property" {
     try forAll2(i32, i32, generators.int(i32), generators.int(i32), struct {
@@ -1007,7 +1007,7 @@ test "check2: shrinks both arguments" {
     }
 }
 
-// ── forAll3 / check3 tests ──────────────────────────────────────────
+// -- forAll3 / check3 tests -----------------------------------------------
 
 test "forAll3: passing three-argument property" {
     try forAll3(i32, i32, bool, generators.int(i32), generators.int(i32), generators.boolean(), struct {
@@ -1015,7 +1015,7 @@ test "forAll3: passing three-argument property" {
     }.prop);
 }
 
-// ── assertEqual tests ────────────────────────────────────────────────
+// -- assertEqual tests ----------------------------------------------------
 
 test "assertEqual: passes for equal values" {
     try assertEqual(i32, 42, 42);
@@ -1027,7 +1027,7 @@ test "assertEqual: fails for unequal values" {
     try std.testing.expect(!result);
 }
 
-// ── expectFailure tests ─────────────────────────────────────────────
+// -- expectFailure tests --------------------------------------------------
 
 test "expectFailure: passes when property fails" {
     try expectFailure(u32, generators.int(u32), struct {
@@ -1050,7 +1050,7 @@ test "expectFailure: returns error when property passes" {
     }
 }
 
-// ── labeled property tests ───────────────────────────────────────────
+// -- labeled property tests -----------------------------------------------
 
 test "forAllLabeled: collects labels without error" {
     try forAllLabeled(i32, generators.int(i32), struct {
@@ -1064,7 +1064,7 @@ test "forAllLabeled: collects labels without error" {
     }.classify);
 }
 
-// ── forAll3 / check3 tests ──────────────────────────────────────────
+// -- forAll3 / check3 tests -----------------------------------------------
 
 test "check3: shrinks all three arguments" {
     const result = check3(.{ .seed = 42, .num_tests = 100 }, u32, u32, u32, generators.int(u32), generators.int(u32), generators.int(u32), struct {

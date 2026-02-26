@@ -1,4 +1,4 @@
-// zcheck — Property-based testing for Zig
+// zcheck -- Property-based testing for Zig
 //
 // Generate random structured inputs, check properties, and automatically
 // shrink failing cases to minimal counterexamples.
@@ -6,16 +6,16 @@
 const std = @import("std");
 const testing = std.testing;
 
-// ── Core types ──────────────────────────────────────────────────────────
+// -- Core types -----------------------------------------------------------
 
 pub const Gen = @import("gen.zig").Gen;
 pub const ShrinkIter = @import("shrink.zig").ShrinkIter;
 
-// ── Built-in generators ─────────────────────────────────────────────────
+// -- Built-in generators --------------------------------------------------
 
 pub const generators = @import("generators.zig");
 
-// ── Runner ──────────────────────────────────────────────────────────────
+// -- Runner ---------------------------------------------------------------
 
 const runner = @import("runner.zig");
 pub const Config = runner.Config;
@@ -42,12 +42,12 @@ pub const forAllLabeledWith = runner.forAllLabeledWith;
 pub const LabelResult = runner.LabelResult;
 pub const CoverageResult = runner.CoverageResult;
 
-// ── Convenience re-exports ──────────────────────────────────────────────
+// -- Convenience re-exports -----------------------------------------------
 
 /// Auto-derive a generator for any supported type via comptime reflection.
 pub const auto = generators.auto;
 
-// ── Slice and string generators ──────────────────────────────────────
+// -- Slice and string generators ------------------------------------------
 
 pub const slice = generators.slice;
 pub const sliceRange = generators.sliceRange;
@@ -58,7 +58,7 @@ pub const alphanumeric = generators.alphanumeric;
 pub const alphanumericString = generators.alphanumericString;
 pub const string = generators.string;
 
-// ── Combinators ──────────────────────────────────────────────────────
+// -- Combinators ----------------------------------------------------------
 
 pub const constant = generators.constant;
 pub const element = generators.element;
@@ -69,7 +69,7 @@ pub const filter = generators.filter;
 pub const noShrink = generators.noShrink;
 pub const shrinkMap = generators.shrinkMap;
 
-// ── Derived generators ──────────────────────────────────────────────
+// -- Derived generators ---------------------------------------------------
 
 pub const shuffle = generators.shuffle;
 pub const sublistOf = generators.sublistOf;
@@ -79,12 +79,12 @@ pub const flatMap = generators.flatMap;
 pub const unicodeChar = generators.unicodeChar;
 pub const unicodeString = generators.unicodeString;
 
-// ── Utility ──────────────────────────────────────────────────────────
+// -- Utility --------------------------------------------------------------
 
 pub const sample = generators.sample;
 pub const sampleWith = generators.sampleWith;
 
-// ── Tests (pull in all modules for `zig build test`) ────────────────────
+// -- Tests (pull in all modules for `zig build test`) ---------------------
 
 test {
     _ = @import("gen.zig");

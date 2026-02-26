@@ -1,4 +1,4 @@
-// Gen(T) — the core generator type.
+// Gen(T) -- the core generator type.
 //
 // A Gen(T) knows how to produce random values of type T and how to shrink
 // a failing value toward a minimal counterexample.
@@ -35,7 +35,7 @@ pub fn Gen(comptime T: type) type {
     };
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// -- Tests ----------------------------------------------------------------
 
 test "Gen: basic construction and generation" {
     const g = Gen(u32){

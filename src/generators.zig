@@ -93,9 +93,9 @@ pub fn float(comptime T: type) Gen(T) {
     };
 }
 
-// ── Slice and string generators ──────────────────────────────────────
+// -- Slice and string generators ------------------------------------------
 
-/// Generator for a single printable ASCII character (32–126).
+/// Generator for a single printable ASCII character (32-126).
 pub fn asciiChar() Gen(u8) {
     return intRange(u8, 32, 126);
 }
@@ -218,7 +218,7 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
     };
 }
 
-/// Generator for ASCII strings (printable characters, 32–126) up to max_len.
+/// Generator for ASCII strings (printable characters, 32-126) up to max_len.
 pub fn asciiString(comptime max_len: usize) Gen([]const u8) {
     return slice(u8, asciiChar(), max_len);
 }
@@ -295,7 +295,7 @@ pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
     };
 }
 
-// ── Combinators ──────────────────────────────────────────────────────
+// -- Combinators ----------------------------------------------------------
 
 /// Always produces the same value. Shrinks to nothing.
 pub fn constant(comptime T: type, comptime value: T) Gen(T) {
@@ -667,7 +667,7 @@ pub fn sublistOf(comptime T: type, comptime items: []const T) Gen([]const T) {
             }
 
             fn int_or_element(comptime U: type) Gen(U) {
-                // Dummy — we only need the shrinker from sliceRange, not genFn
+                // Dummy -- we only need the shrinker from sliceRange, not genFn
                 return .{
                     .genFn = struct {
                         fn f(_: std.Random, _: std.mem.Allocator) U {
@@ -863,7 +863,7 @@ fn enumGen(comptime T: type) Gen(T) {
     };
 }
 
-/// Generator for structs — generates each field independently.
+/// Generator for structs -- generates each field independently.
 fn structGen(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError("structGen requires a struct type");
@@ -948,7 +948,7 @@ fn structGen(comptime T: type) Gen(T) {
     };
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// -- Tests ----------------------------------------------------------------
 
 test "int generator produces values" {
     var prng = std.Random.DefaultPrng.init(12345);
@@ -1027,7 +1027,7 @@ test "auto: nested struct generation" {
     _ = v.value;
 }
 
-// ── Shrink tests ─────────────────────────────────────────────────────
+// -- Shrink tests ---------------------------------------------------------
 
 test "int shrink: 100 first candidate is 0" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1071,7 +1071,7 @@ test "enum shrink: sparse enum uses declaration order" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const g = enumGen(Sparse);
-    // .c has tag value 1 but declaration index 2 — should shrink to .a and .b
+    // .c has tag value 1 but declaration index 2 -- should shrink to .a and .b
     var si = g.shrink(.c, arena_state.allocator());
     try std.testing.expectEqual(Sparse.a, si.next().?);
     try std.testing.expectEqual(Sparse.b, si.next().?);
@@ -1090,7 +1090,7 @@ test "struct shrink: first candidate shrinks first field" {
     try std.testing.expectEqual(@as(i32, -50), first.y);
 }
 
-// ── Combinator tests ─────────────────────────────────────────────────
+// -- Combinator tests -----------------------------------------------------
 
 test "constant: always produces the same value" {
     var prng = std.Random.DefaultPrng.init(42);
@@ -1261,7 +1261,7 @@ test "shrinkMap: shrinks via isomorphism" {
     }.backward);
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
-    // Shrink 100 — should get 0 first (i32 shrinker starts with 0, mapped to u32 0)
+    // Shrink 100 -- should get 0 first (i32 shrinker starts with 0, mapped to u32 0)
     var si = g.shrink(100, arena_state.allocator());
     try std.testing.expectEqual(@as(u32, 0), si.next().?);
 }
@@ -1383,7 +1383,7 @@ test "unicodeString: produces valid UTF-8" {
     }
 }
 
-// ── Slice and string tests ───────────────────────────────────────────
+// -- Slice and string tests -----------------------------------------------
 
 test "asciiChar: produces printable ASCII" {
     var prng = std.Random.DefaultPrng.init(42);
@@ -1457,14 +1457,14 @@ test "slice shrink: tries shorter then element-wise" {
     const original = &[_]u8{ 100, 200 };
     var si = g.shrink(original, arena_state.allocator());
 
-    // Phase 0: shorter prefixes — empty, then length 1
+    // Phase 0: shorter prefixes -- empty, then length 1
     const empty = si.next().?;
     try std.testing.expectEqual(@as(usize, 0), empty.len);
     const len1 = si.next().?;
     try std.testing.expectEqual(@as(usize, 1), len1.len);
     try std.testing.expectEqual(@as(u8, 100), len1[0]);
 
-    // Phase 1: shrink elements — first element shrunk (int shrink: 100 → 0)
+    // Phase 1: shrink elements -- first element shrunk (int shrink: 100 -> 0)
     const shrunk_elem = si.next().?;
     try std.testing.expectEqual(@as(usize, 2), shrunk_elem.len);
     try std.testing.expectEqual(@as(u8, 0), shrunk_elem[0]); // 100 shrunk to 0

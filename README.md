@@ -28,12 +28,12 @@ test "addition is commutative" {
 When a property fails, zcheck automatically shrinks the counterexample to a minimal reproduction:
 
 ```
-━━━ zcheck: FAILED after 3 tests ━━━━━━━━━━━━━━━━━━━━━━
+--- zcheck: FAILED after 3 tests ----------------------
   Counterexample: 10
   Shrunk (12 steps) from: 1847382901
   Reproduction seed: 0x2a
   Rerun with: .seed = 0x2a
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-------------------------------------------------------
 ```
 
 ## Installation
