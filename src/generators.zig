@@ -438,6 +438,69 @@ pub fn filter(
     };
 }
 
+/// Pick from generators with weighted probability.
+/// Takes a comptime array of `{weight, gen}` tuples. Higher weights mean
+/// more likely to be chosen. Shrinks using the selected generator's shrinker.
+pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Gen(T) }) Gen(T) {
+    comptime {
+        if (weighted.len == 0) @compileError("frequency() requires at least one weighted generator");
+        for (weighted) |entry| {
+            if (entry[0] == 0) @compileError("frequency(): weight must be > 0");
+        }
+    }
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator) T {
+                comptime var total: usize = 0;
+                inline for (weighted) |entry| {
+                    total += entry[0];
+                }
+                var pick = rng.intRangeLessThan(usize, 0, total);
+                inline for (weighted) |entry| {
+                    if (pick < entry[0]) return entry[1].generate(rng, allocator);
+                    pick -= entry[0];
+                }
+                unreachable;
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // We don't know which generator produced the value, so try all shrinkers
+                const iters = allocator.alloc(ShrinkIter(T), weighted.len) catch return ShrinkIter(T).empty();
+                inline for (weighted, 0..) |entry, i| {
+                    iters[i] = entry[1].shrink(value, allocator);
+                }
+
+                const State = struct {
+                    iters_arr: []ShrinkIter(T),
+                    pos: usize,
+                };
+                const state = allocator.create(State) catch {
+                    allocator.free(iters);
+                    return ShrinkIter(T).empty();
+                };
+                state.* = .{ .iters_arr = iters, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?T {
+                            const s: *State = @ptrCast(@alignCast(ctx));
+                            while (s.pos < s.iters_arr.len) {
+                                if (s.iters_arr[s.pos].next()) |val| {
+                                    return val;
+                                }
+                                s.pos += 1;
+                            }
+                            return null;
+                        }
+                    }.next,
+                };
+            }
+        }.shrinkFn,
+    };
+}
+
 /// Auto-derive a generator for any supported type via comptime reflection.
 pub fn auto(comptime T: type) Gen(T) {
     return switch (@typeInfo(T)) {
@@ -855,6 +918,35 @@ test "filter: shrinks skip values failing predicate" {
     // All shrink candidates must be even
     while (si.next()) |candidate| {
         try std.testing.expect(@mod(candidate, 2) == 0);
+    }
+}
+
+test "frequency: respects weights" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime frequency(u32, &.{
+        .{ 9, constant(u32, 1) },
+        .{ 1, constant(u32, 2) },
+    });
+    var count_1: usize = 0;
+    var count_2: usize = 0;
+    for (0..1000) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator);
+        if (v == 1) count_1 += 1;
+        if (v == 2) count_2 += 1;
+    }
+    // With 9:1 weights, ~90% should be 1
+    try std.testing.expect(count_1 > 700);
+    try std.testing.expect(count_2 > 30);
+    try std.testing.expect(count_1 + count_2 == 1000);
+}
+
+test "frequency: single generator" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime frequency(u32, &.{
+        .{ 1, constant(u32, 42) },
+    });
+    for (0..50) |_| {
+        try std.testing.expectEqual(@as(u32, 42), g.generate(prng.random(), std.testing.allocator));
     }
 }
 

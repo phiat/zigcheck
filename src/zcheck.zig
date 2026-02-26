@@ -20,8 +20,19 @@ pub const generators = @import("generators.zig");
 const runner = @import("runner.zig");
 pub const Config = runner.Config;
 pub const CheckResult = runner.CheckResult;
+pub const CheckResult2 = runner.CheckResult2;
+pub const CheckResult3 = runner.CheckResult3;
 pub const check = runner.check;
+pub const check2 = runner.check2;
+pub const check3 = runner.check3;
 pub const forAll = runner.forAll;
+pub const forAll2 = runner.forAll2;
+pub const forAll2With = runner.forAll2With;
+pub const forAll3 = runner.forAll3;
+pub const forAll3With = runner.forAll3With;
+pub const forAllWith = runner.forAllWith;
+pub const assume = runner.assume;
+pub const TestDiscarded = runner.TestDiscarded;
 
 // ── Convenience re-exports ──────────────────────────────────────────────
 
@@ -46,6 +57,7 @@ pub const string = generators.string;
 pub const constant = generators.constant;
 pub const element = generators.element;
 pub const oneOf = generators.oneOf;
+pub const frequency = generators.frequency;
 pub const map = generators.map;
 pub const filter = generators.filter;
 
