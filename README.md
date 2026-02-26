@@ -289,11 +289,14 @@ zig build test
 
 ```
 src/
-  zcheck.zig      # Public API re-exports
-  gen.zig          # Gen(T) core type
-  generators.zig   # Built-in generators and combinators
-  shrink.zig       # ShrinkIter(T) and shrink state types
-  runner.zig       # forAll/check engine with shrink loop
+  zcheck.zig        # Public API re-exports
+  gen.zig            # Gen(T) core type
+  generators.zig     # Primitive generators (int, float, bool) + re-exports
+  combinators.zig    # Combinators (constant, element, oneOf, map, filter, etc.)
+  collections.zig    # Slice, string, unicode, shuffle, sublist, ordered list
+  auto.zig           # Auto-derivation (enum, struct, optional, union)
+  shrink.zig         # ShrinkIter(T) and shrink state types
+  runner.zig         # forAll/check engine with shrink loop
 ```
 
 ## Built with
