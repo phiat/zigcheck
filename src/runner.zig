@@ -380,14 +380,9 @@ pub fn check(
     return .{ .passed = .{ .num_tests = tests_run } };
 }
 
-const ShrinkResult = struct {
-    fn Of(comptime T: type) type {
-        return struct {
-            value: T,
-            steps: usize,
-        };
-    }
-};
+fn ShrinkResult(comptime T: type) type {
+    return struct { value: T, steps: usize };
+}
 
 fn doShrink(
     comptime T: type,
@@ -396,7 +391,7 @@ fn doShrink(
     original: T,
     max_shrinks: usize,
     verbose_shrink: bool,
-) ShrinkResult.Of(T) {
+) ShrinkResult(T) {
     var best = original;
     var steps: usize = 0;
 
