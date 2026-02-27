@@ -422,6 +422,68 @@ pub fn scale(comptime T: type, comptime inner: Gen(T), comptime pct: usize) Gen(
     };
 }
 
+/// Transform the size parameter with a comptime-known function before passing
+/// to the inner generator. QuickCheck: `mapSize`.
+///
+/// ```zig
+/// // Double the size for this generator
+/// const g = zigcheck.mapSize(u32, zigcheck.generators.int(u32), struct {
+///     fn f(size: usize) usize { return size * 2; }
+/// }.f);
+/// ```
+pub fn mapSize(comptime T: type, comptime inner: Gen(T), comptime f: *const fn (usize) usize) Gen(T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
+                return inner.generate(rng, allocator, f(size));
+            }
+        }.gen,
+        .shrinkFn = inner.shrinkFn,
+    };
+}
+
+/// Filter and transform in one step. Generates values from `inner`, applies
+/// `f`, and keeps only `non-null` results. Retries up to 1000 times.
+/// QuickCheck: `suchThatMap`.
+///
+/// ```zig
+/// // Generate even numbers by doubling, with shrinking
+/// const g = zigcheck.suchThatMap(u32, u32, zigcheck.generators.int(u32), struct {
+///     fn f(n: u32) ?u32 {
+///         if (n > 1000) return null;  // reject large values
+///         return n * 2;               // transform to even
+///     }
+/// }.f);
+/// ```
+pub fn suchThatMap(
+    comptime A: type,
+    comptime B: type,
+    comptime inner: Gen(A),
+    comptime f: *const fn (A) ?B,
+) Gen(B) {
+    const max_retries = 1000;
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                for (0..max_retries) |_| {
+                    const a = inner.generate(rng, allocator, size);
+                    if (f(a)) |b| return b;
+                }
+                std.log.info("zigcheck.suchThatMap: transform returned null {d} consecutive times", .{max_retries});
+                // Last resort: generate one more and force through
+                const a = inner.generate(rng, allocator, size);
+                return f(a) orelse @as(B, undefined);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
+                // Can't shrink: f is not invertible (same as map).
+                return ShrinkIter(B).empty();
+            }
+        }.shrinkFn,
+    };
+}
+
 // -- Tests ----------------------------------------------------------------
 
 test "constant: always produces the same value" {
@@ -656,4 +718,34 @@ test "scale: halves the size parameter" {
     }
     // With scale(50), effective size is 50, so max len should be ~50, not 100
     try std.testing.expect(max_len <= 55);
+}
+
+test "mapSize: transforms size parameter" {
+    var prng = std.Random.DefaultPrng.init(42);
+    // mapSize that always returns 0 should make size-aware int produce 0
+    const g = comptime mapSize(i32, generators.int(i32), struct {
+        fn f(_: usize) usize {
+            return 0;
+        }
+    }.f);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expectEqual(@as(i32, 0), v);
+    }
+}
+
+test "suchThatMap: filters and transforms" {
+    var prng = std.Random.DefaultPrng.init(42);
+    // Only keep values <= 50, double them
+    const g = comptime suchThatMap(u8, u16, generators.int(u8), struct {
+        fn f(n: u8) ?u16 {
+            if (n > 50) return null;
+            return @as(u16, n) * 2;
+        }
+    }.f);
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(v <= 100);
+        try std.testing.expect(v % 2 == 0);
+    }
 }

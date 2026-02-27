@@ -47,6 +47,33 @@ pub fn assertEqual(comptime T: type, expected: T, actual: T) !void {
     }
 }
 
+/// Wrap a property function with a time limit (in microseconds).
+/// If the property takes longer than the limit, it fails with
+/// `error.PropertyTimedOut`. QuickCheck: `within`.
+///
+/// ```zig
+/// try zigcheck.forAll(u32, gen, zigcheck.within(u32, 1_000_000, struct {
+///     fn prop(n: u32) !void { ... }
+/// }.prop));
+/// ```
+pub fn within(
+    comptime T: type,
+    comptime timeout_us: u64,
+    comptime property: *const fn (T) anyerror!void,
+) *const fn (T) anyerror!void {
+    return struct {
+        fn wrapped(value: T) anyerror!void {
+            var timer = std.time.Timer.start() catch return property(value);
+            property(value) catch |err| return err;
+            const elapsed = timer.read();
+            if (elapsed / 1000 > timeout_us) {
+                std.log.err("zigcheck.within: property took {d}us, limit is {d}us", .{ elapsed / 1000, timeout_us });
+                return error.PropertyTimedOut;
+            }
+        }
+    }.wrapped;
+}
+
 pub const Config = struct {
     /// Number of test cases to generate.
     num_tests: usize = 100,
@@ -1698,5 +1725,17 @@ test "verbose mode determinism: same results as non-verbose" {
             else => return error.TestUnexpectedResult,
         },
         .gave_up => return error.TestUnexpectedResult,
+    }
+}
+
+test "within: fast property passes" {
+    // A trivial property that completes instantly should pass within a generous limit
+    const prop = within(u32, 10_000_000, struct {
+        fn f(_: u32) !void {}
+    }.f);
+    const result = check(.{ .seed = 42, .num_tests = 10 }, u32, generators.int(u32), prop);
+    switch (result) {
+        .passed => {},
+        else => return error.TestUnexpectedResult,
     }
 }

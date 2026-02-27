@@ -37,6 +37,7 @@ pub const expectFailure = runner.expectFailure;
 pub const expectFailureWith = runner.expectFailureWith;
 pub const TestDiscarded = runner.TestDiscarded;
 pub const counterexample = runner.counterexample;
+pub const within = runner.within;
 pub const forAllLabeled = runner.forAllLabeled;
 pub const forAllLabeledWith = runner.forAllLabeledWith;
 pub const checkLabeled = runner.checkLabeled;
@@ -88,6 +89,8 @@ pub const flatMap = generators.flatMap;
 pub const sized = generators.sized;
 pub const resize = generators.resize;
 pub const scale = generators.scale;
+pub const mapSize = generators.mapSize;
+pub const suchThatMap = generators.suchThatMap;
 pub const unicodeChar = generators.unicodeChar;
 pub const unicodeString = generators.unicodeString;
 

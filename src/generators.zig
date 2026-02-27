@@ -258,6 +258,8 @@ pub const flatMap = combinators_mod.flatMap;
 pub const sized = combinators_mod.sized;
 pub const resize = combinators_mod.resize;
 pub const scale = combinators_mod.scale;
+pub const mapSize = combinators_mod.mapSize;
+pub const suchThatMap = combinators_mod.suchThatMap;
 
 // Collections and strings
 pub const asciiChar = collections_mod.asciiChar;

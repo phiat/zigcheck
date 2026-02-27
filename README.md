@@ -1,12 +1,12 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-133%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-136%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-35%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~85%25-informational)](#api)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~88%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
@@ -156,6 +156,8 @@ const g = zigcheck.auto(Point);
 | `sized(T, factory)` | `Gen(T)` | Generator from size-dependent factory function |
 | `resize(T, gen, size)` | `Gen(T)` | Override size parameter to a fixed value |
 | `scale(T, gen, pct)` | `Gen(T)` | Scale size parameter by percentage |
+| `mapSize(T, gen, fn)` | `Gen(T)` | Transform size parameter with a function |
+| `suchThatMap(A, B, gen, fn)` | `Gen(B)` | Filter and transform in one step |
 
 ```zig
 // Only test with positive even numbers
@@ -325,6 +327,7 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 | `forAllTabulate(config, T, gen, prop, table, classifier)` | Group labels under a named table (QuickCheck `tabulate`) |
 | `conjoin(config, T, gen, properties)` | All properties must hold (`.&&.`) |
 | `disjoin(config, T, gen, properties)` | At least one must hold (`.||.`) |
+| `within(T, timeout_us, property)` | Fail if property takes longer than limit (QuickCheck `within`) |
 
 ### Utility
 
