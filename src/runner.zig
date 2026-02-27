@@ -980,6 +980,7 @@ pub fn forAllCtxWith(
             return error.GaveUp;
         }
 
+        _ = gen_arena.reset(.retain_capacity);
         const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
         const value = gen.generate(rng, gen_alloc, size);
 

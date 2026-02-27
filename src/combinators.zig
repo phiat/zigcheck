@@ -160,7 +160,6 @@ pub fn map(
             fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
                 // f is not invertible, so we can't recover the original A to
                 // feed to inner's shrinker. Use shrinkMap for shrink support.
-                std.log.warn("zigcheck.map: shrinking disabled for non-invertible transform; use shrinkMap(A, B, gen, fwd, bwd) for shrink support", .{});
                 return ShrinkIter(B).empty();
             }
         }.shrinkFn,
@@ -364,7 +363,6 @@ pub fn flatMap(
         .shrinkFn = struct {
             fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
                 // Can't shrink: we don't know which gen_b produced this value.
-                std.log.warn("zigcheck.flatMap: shrinking disabled for dependent generation; consider restructuring to use a direct generator with shrinkMap", .{});
                 return ShrinkIter(B).empty();
             }
         }.shrinkFn,
