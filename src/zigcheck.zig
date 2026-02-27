@@ -85,6 +85,9 @@ pub const sublistOf = generators.sublistOf;
 pub const orderedList = generators.orderedList;
 pub const growingElements = generators.growingElements;
 pub const flatMap = generators.flatMap;
+pub const sized = generators.sized;
+pub const resize = generators.resize;
+pub const scale = generators.scale;
 pub const unicodeChar = generators.unicodeChar;
 pub const unicodeString = generators.unicodeString;
 

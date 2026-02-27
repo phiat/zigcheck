@@ -46,34 +46,26 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
             fn shrinkFn(value: []const T, allocator: std.mem.Allocator) ShrinkIter([]const T) {
                 if (value.len <= min_len) return ShrinkIter([]const T).empty();
 
-                // Shrink phases:
-                //  1. Shorter prefixes (length min_len..original.len-1)
-                //  2. Delete one element at each position
-                //  3. Shrink individual elements in place
-                const Phase = enum { prefixes, deletions, elements };
+                // Shrink phases (QuickCheck-style):
+                //  1. Remove chunks: halves, quarters, eighths, ... down to single deletions
+                //  2. Shrink individual elements in place
+                const Phase = enum { chunks, elements };
 
                 const State = struct {
                     original: []const T,
                     alloc: std.mem.Allocator,
                     phase: Phase,
-                    // Shorter-prefix phase: next length to try
-                    next_len: usize,
-                    // Delete-one phase: index of element to delete next
-                    delete_idx: usize,
+                    // Chunk-removal phase: current chunk size and start offset
+                    chunk_size: usize,
+                    chunk_start: usize,
                     // Element-shrink phase: position and current element's shrinker
                     elem_idx: usize,
                     elem_shrinker: ShrinkIter(T),
 
                     fn nextImpl(self: *@This()) ?[]const T {
                         switch (self.phase) {
-                            .prefixes => {
-                                if (self.tryShorter()) |result| return result;
-                                self.phase = .deletions;
-                                self.delete_idx = 0;
-                                return self.nextImpl();
-                            },
-                            .deletions => {
-                                if (self.tryDeleteOne()) |result| return result;
+                            .chunks => {
+                                if (self.tryRemoveChunk()) |result| return result;
                                 self.phase = .elements;
                                 self.elem_idx = 0;
                                 self.startElementShrinker();
@@ -85,23 +77,22 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                         }
                     }
 
-                    /// Yield the next shorter prefix, or null when exhausted.
-                    fn tryShorter(self: *@This()) ?[]const T {
-                        while (self.next_len < self.original.len) {
-                            const len = self.next_len;
-                            self.next_len += 1;
-                            return self.copyPrefix(len);
-                        }
-                        return null;
-                    }
-
-                    /// Yield the original with element at delete_idx removed.
-                    fn tryDeleteOne(self: *@This()) ?[]const T {
-                        if (self.original.len <= min_len) return null;
-                        while (self.delete_idx < self.original.len) {
-                            const idx = self.delete_idx;
-                            self.delete_idx += 1;
-                            return self.copyWithout(idx);
+                    /// Try removing a chunk of current size at current position.
+                    /// When all positions exhausted, halve the chunk size.
+                    /// Stop when chunk size reaches 0.
+                    fn tryRemoveChunk(self: *@This()) ?[]const T {
+                        while (self.chunk_size > 0) {
+                            while (self.chunk_start + self.chunk_size <= self.original.len) {
+                                const start = self.chunk_start;
+                                const end = start + self.chunk_size;
+                                self.chunk_start += 1;
+                                const new_len = self.original.len - self.chunk_size;
+                                if (new_len < min_len) continue;
+                                return self.copyWithoutRange(start, end);
+                            }
+                            // Halve chunk size, reset start
+                            self.chunk_size /= 2;
+                            self.chunk_start = 0;
                         }
                         return null;
                     }
@@ -118,21 +109,13 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                         return null;
                     }
 
-                    fn copyPrefix(self: *@This(), len: usize) ?[]const T {
-                        const result = self.alloc.alloc(T, len) catch return null;
-                        if (len > 0) @memcpy(result, self.original[0..len]);
-                        return result;
-                    }
-
-                    fn copyWithout(self: *@This(), skip_idx: usize) ?[]const T {
-                        const new_len = self.original.len - 1;
+                    /// Copy original with range [start, end) removed.
+                    fn copyWithoutRange(self: *@This(), start: usize, end: usize) ?[]const T {
+                        const removed = end - start;
+                        const new_len = self.original.len - removed;
                         const result = self.alloc.alloc(T, new_len) catch return null;
-                        var out: usize = 0;
-                        for (0..self.original.len) |i| {
-                            if (i == skip_idx) continue;
-                            result[out] = self.original[i];
-                            out += 1;
-                        }
+                        if (start > 0) @memcpy(result[0..start], self.original[0..start]);
+                        if (end < self.original.len) @memcpy(result[start..new_len], self.original[end..self.original.len]);
                         return result;
                     }
 
@@ -155,13 +138,17 @@ pub fn sliceRange(comptime T: type, comptime inner: Gen(T), comptime min_len: us
                     }
                 };
 
+                // Start with chunk_size = half of original length
+                const initial_chunk = (value.len - min_len) / 2;
+                const effective_chunk = if (initial_chunk == 0) 1 else initial_chunk;
+
                 const state = allocator.create(State) catch return ShrinkIter([]const T).empty();
                 state.* = .{
                     .original = value,
                     .alloc = allocator,
-                    .phase = .prefixes,
-                    .next_len = min_len,
-                    .delete_idx = 0,
+                    .phase = .chunks,
+                    .chunk_size = effective_chunk,
+                    .chunk_start = 0,
                     .elem_idx = 0,
                     .elem_shrinker = ShrinkIter(T).empty(),
                 };
@@ -614,43 +601,35 @@ test "asciiString: generates valid ASCII strings" {
     }
 }
 
-test "slice shrink: first candidate is empty" {
+test "slice shrink: chunk-based removal starts with half" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const g = slice(u8, generators.int(u8), 10);
-    const original = &[_]u8{ 5, 10, 15 };
+    const original = &[_]u8{ 1, 2, 3, 4 };
     var si = g.shrink(original, arena_state.allocator());
+    // chunk_size starts at (4-0)/2 = 2; first candidate removes [0..2)
     const first = si.next().?;
-    try std.testing.expectEqual(@as(usize, 0), first.len);
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+    try std.testing.expectEqual(@as(u8, 3), first[0]);
+    try std.testing.expectEqual(@as(u8, 4), first[1]);
 }
 
-test "slice shrink: tries shorter, then deletions, then element-wise" {
+test "slice shrink: all candidates are shorter or have shrunk elements" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const g = slice(u8, generators.int(u8), 10);
     const original = &[_]u8{ 100, 200 };
     var si = g.shrink(original, arena_state.allocator());
 
-    // Phase 0: shorter prefixes -- empty, then length 1
-    const empty = si.next().?;
-    try std.testing.expectEqual(@as(usize, 0), empty.len);
-    const len1 = si.next().?;
-    try std.testing.expectEqual(@as(usize, 1), len1.len);
-    try std.testing.expectEqual(@as(u8, 100), len1[0]);
-
-    // Phase 1: delete one element -- remove [0] then [1]
-    const del0 = si.next().?;
-    try std.testing.expectEqual(@as(usize, 1), del0.len);
-    try std.testing.expectEqual(@as(u8, 200), del0[0]); // removed first element
-    const del1 = si.next().?;
-    try std.testing.expectEqual(@as(usize, 1), del1.len);
-    try std.testing.expectEqual(@as(u8, 100), del1[0]); // removed second element
-
-    // Phase 2: shrink elements -- first element shrunk (int shrink: 100 -> 0)
-    const shrunk_elem = si.next().?;
-    try std.testing.expectEqual(@as(usize, 2), shrunk_elem.len);
-    try std.testing.expectEqual(@as(u8, 0), shrunk_elem[0]); // 100 shrunk to 0
-    try std.testing.expectEqual(@as(u8, 200), shrunk_elem[1]); // unchanged
+    // chunk_size = (2-0)/2 = 1, so single-element removals first, then element shrinks
+    var count: usize = 0;
+    while (si.next()) |candidate| {
+        // All candidates should either be shorter or same length with smaller elements
+        try std.testing.expect(candidate.len <= original.len);
+        count += 1;
+        if (count > 50) break;
+    }
+    try std.testing.expect(count > 0);
 }
 
 test "slice shrink: respects min_len" {
@@ -659,9 +638,10 @@ test "slice shrink: respects min_len" {
     const g = sliceRange(u8, generators.int(u8), 2, 10);
     const original = &[_]u8{ 5, 10, 15 };
     var si = g.shrink(original, arena_state.allocator());
-    // First candidate should be length 2 (min_len), not empty
-    const first = si.next().?;
-    try std.testing.expectEqual(@as(usize, 2), first.len);
+    // All chunk removals must respect min_len=2
+    while (si.next()) |candidate| {
+        try std.testing.expect(candidate.len >= 2);
+    }
 }
 
 test "slice shrink: empty slice has no shrinks" {

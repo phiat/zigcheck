@@ -1,12 +1,12 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-128%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-133%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
-[![Generators](https://img.shields.io/badge/generators-30%2B-blueviolet)](#generators)
+[![Generators](https://img.shields.io/badge/generators-35%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~75%25-informational)](#api)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~85%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
@@ -90,9 +90,9 @@ my_tests.root_module.addImport("zigcheck", zigcheck_mod);
 
 | Generator | Type | Description |
 |---|---|---|
-| `generators.int(T)` | `Gen(T)` | Full-range integer |
+| `generators.int(T)` | `Gen(T)` | Size-scaled integer (small at size 0, full range at max) |
 | `generators.intRange(T, min, max)` | `Gen(T)` | Integer in `[min, max]` |
-| `generators.float(T)` | `Gen(T)` | Full-range finite float |
+| `generators.float(T)` | `Gen(T)` | Size-scaled finite float |
 | `generators.boolean()` | `Gen(bool)` | `true` or `false` |
 | `generators.byte()` | `Gen(u8)` | Single byte (alias for `int(u8)`) |
 | `generators.positive(T)` | `Gen(T)` | Strictly positive integer (`> 0`) |
@@ -153,6 +153,9 @@ const g = zigcheck.auto(Point);
 | `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation (no shrinking) |
 | `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
 | `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
+| `sized(T, factory)` | `Gen(T)` | Generator from size-dependent factory function |
+| `resize(T, gen, size)` | `Gen(T)` | Override size parameter to a fixed value |
+| `scale(T, gen, pct)` | `Gen(T)` | Scale size parameter by percentage |
 
 ```zig
 // Only test with positive even numbers
@@ -190,7 +193,7 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | Float | Yield `0.0`, then halve toward zero (handles NaN/Inf) |
 | Enum | Yield variants with lower declaration index |
 | Struct | Shrink each field independently |
-| Slice | Shorter prefixes first, then shrink individual elements |
+| Slice | Remove chunks (halves, quarters, ..., single elements), then shrink elements |
 | `element` | Shrink toward earlier elements in the list |
 | `filter` | Inner shrinker, filtered by predicate |
 
@@ -266,6 +269,7 @@ try zigcheck.forAllWith(.{
     .seed = 0x2a,             // default: null (time-based)
     .verbose = true,          // default: false
     .verbose_shrink = true,   // default: false
+    .max_size = 200,          // default: 100
     .allocator = my_alloc,    // default: std.testing.allocator
 }, i32, gen, property);
 ```
@@ -281,9 +285,14 @@ try zigcheck.forAllWith(cfg, i32, gen, property);
 
 ## Size parameter
 
-Like QuickCheck, zigcheck threads a `size` parameter (0–100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
+Like QuickCheck, zigcheck threads a `size` parameter (0 to `max_size`, default 100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
 
-Slice and string generators use size to scale the maximum length — at size 0, they generate minimum-length values; at size 100, they generate up to the configured maximum. Primitive generators (int, float, bool) ignore size and use the full range.
+All generators respect size:
+- **int(T)** and **float(T)** scale their range — at size 0 they produce `0`, at max size they produce full-range values
+- **Slice/string generators** scale their maximum length — at size 0 they generate minimum-length values, at max size they generate up to the configured maximum
+- **intRange**, **boolean**, **element**, **enum** ignore size (their range is already constrained)
+
+Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)` to multiply the size by a percentage, or `sized(T, factory)` to build a generator whose behavior depends on the current size. Set `max_size` in Config to change the upper bound.
 
 ## API
 

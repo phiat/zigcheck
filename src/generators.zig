@@ -8,15 +8,40 @@ const shrink = @import("shrink.zig");
 
 // -- Primitive generators -------------------------------------------------
 
-/// Generator for any integer type. Produces the full range of values.
+/// Generator for any integer type. Scales with size: at size 0 produces
+/// values near zero, at max size produces full-range values. This matches
+/// QuickCheck's `arbitrary` for integers.
 pub fn int(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .int) @compileError("int() requires an integer type, got " ++ @typeName(T));
     }
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
-                return rng.int(T);
+            fn f(rng: std.Random, _: std.mem.Allocator, size: usize) T {
+                // At size 0, only generate 0. At max size, full range.
+                // In between, restrict to [-size, size] (clamped to type range).
+                if (size == 0) return 0;
+
+                const info = @typeInfo(T).int;
+                const bits = info.bits;
+
+                // For small types (8 bits or less), just use full range once
+                // size is non-zero to avoid excessive restriction.
+                if (bits <= 8) return rng.int(T);
+
+                // Compute the bound: scale by size/100, minimum ±1
+                // Use wider arithmetic to avoid overflow
+                if (info.signedness == .signed) {
+                    const max_val = std.math.maxInt(T);
+                    const Wide = std.meta.Int(.unsigned, bits);
+                    const bound_wide: Wide = @intCast(@max(1, @as(u128, @intCast(max_val)) * size / 100));
+                    const bound: T = @intCast(@min(bound_wide, @as(Wide, @intCast(max_val))));
+                    return rng.intRangeAtMost(T, -bound, bound);
+                } else {
+                    const max_val = std.math.maxInt(T);
+                    const bound: T = @intCast(@min(@as(u128, @intCast(max_val)), @max(1, @as(u128, @intCast(max_val)) * size / 100)));
+                    return rng.intRangeAtMost(T, 0, bound);
+                }
             }
         }.f,
         .shrinkFn = struct {
@@ -134,8 +159,8 @@ pub fn byte() Gen(u8) {
 }
 
 /// Generator for floating point types (f16, f32, f64).
-/// Produces the full range of finite float values including negatives.
-/// Does not produce NaN or infinity (use floatAny for those).
+/// Scales with size: at size 0 produces values near zero, at max size
+/// produces full-range finite values. Does not produce NaN or infinity.
 pub fn float(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .float) @compileError("float() requires a float type, got " ++ @typeName(T));
@@ -143,12 +168,20 @@ pub fn float(comptime T: type) Gen(T) {
     const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
     return .{
         .genFn = struct {
-            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
+            fn f(rng: std.Random, _: std.mem.Allocator, size: usize) T {
+                if (size == 0) return 0.0;
+
                 // Generate full-range finite floats via random bit patterns,
                 // re-rolling NaN and infinity to keep values finite.
                 while (true) {
                     const result: T = @bitCast(rng.int(Bits));
-                    if (std.math.isFinite(result)) return result;
+                    if (!std.math.isFinite(result)) continue;
+                    // Scale by size/100
+                    if (size >= 100) return result;
+                    const factor: T = @as(T, @floatFromInt(size)) / 100.0;
+                    const scaled = result * factor;
+                    if (std.math.isFinite(scaled)) return scaled;
+                    // If scaling produced inf (very large * small fraction), retry
                 }
             }
         }.f,
@@ -222,6 +255,9 @@ pub const frequency = combinators_mod.frequency;
 pub const noShrink = combinators_mod.noShrink;
 pub const shrinkMap = combinators_mod.shrinkMap;
 pub const flatMap = combinators_mod.flatMap;
+pub const sized = combinators_mod.sized;
+pub const resize = combinators_mod.resize;
+pub const scale = combinators_mod.scale;
 
 // Collections and strings
 pub const asciiChar = collections_mod.asciiChar;
@@ -441,5 +477,34 @@ test "negative: shrinker stays < 0" {
     var si = g.shrink(-50, arena_state.allocator());
     while (si.next()) |v| {
         try std.testing.expect(v < 0);
+    }
+}
+
+test "int: size 0 produces zero" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = int(i32);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 0);
+        try std.testing.expectEqual(@as(i32, 0), v);
+    }
+}
+
+test "int: small size produces small values" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = int(i32);
+    const max_val = std.math.maxInt(i32);
+    const bound: i32 = @intCast(max_val / 100 * 10 + 1); // ~10% of range + margin
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 10);
+        try std.testing.expect(v >= -bound and v <= bound);
+    }
+}
+
+test "float: size 0 produces zero" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = float(f64);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 0);
+        try std.testing.expectEqual(@as(f64, 0.0), v);
     }
 }

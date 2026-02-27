@@ -187,7 +187,7 @@ pub fn filter(
                 }
                 // Log a diagnostic rather than panicking so the test runner can
                 // report the seed and continue with other tests.
-                std.log.warn("zigcheck.filter: predicate rejected {d} consecutive values; predicate may be too restrictive", .{max_retries});
+                std.log.info("zigcheck.filter: predicate rejected {d} consecutive values; predicate may be too restrictive", .{max_retries});
                 // Return the last generated value even though it doesn't pass the
                 // predicate. This lets the runner proceed (the property will likely
                 // fail, and the seed will be reported).
@@ -368,6 +368,57 @@ pub fn flatMap(
                 return ShrinkIter(B).empty();
             }
         }.shrinkFn,
+    };
+}
+
+/// Create a generator whose generation depends on the current size parameter.
+/// The factory function receives the current size and returns a generator.
+/// QuickCheck: `sized`.
+pub fn sized(comptime T: type, comptime factory: *const fn (usize) Gen(T)) Gen(T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
+                const inner = factory(size);
+                return inner.generate(rng, allocator, size);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                // Can't recover which inner generator was used, so no shrinking.
+                _ = value;
+                _ = allocator;
+                return ShrinkIter(T).empty();
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Override the size parameter for a generator. The inner generator always
+/// sees `new_size` regardless of what the runner passes.
+/// QuickCheck: `resize`.
+pub fn resize(comptime T: type, comptime inner: Gen(T), comptime new_size: usize) Gen(T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, _: usize) T {
+                return inner.generate(rng, allocator, new_size);
+            }
+        }.gen,
+        .shrinkFn = inner.shrinkFn,
+    };
+}
+
+/// Scale the size parameter by a comptime-known factor (as a percentage).
+/// `scale(T, gen, 50)` halves the size; `scale(T, gen, 200)` doubles it.
+/// QuickCheck: `scale`.
+pub fn scale(comptime T: type, comptime inner: Gen(T), comptime pct: usize) Gen(T) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
+                const scaled = size * pct / 100;
+                return inner.generate(rng, allocator, scaled);
+            }
+        }.gen,
+        .shrinkFn = inner.shrinkFn,
     };
 }
 
@@ -579,4 +630,30 @@ test "filter: exhaustion does not panic" {
     }.pred);
     // This should NOT panic -- just returns a value
     _ = g.generate(prng.random(), std.testing.allocator, 100);
+}
+
+test "resize: overrides size parameter" {
+    var prng = std.Random.DefaultPrng.init(42);
+    // resize with size=0 on a size-aware int generator should always produce 0
+    const g = resize(i32, generators.int(i32), 0);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expectEqual(@as(i32, 0), v);
+    }
+}
+
+test "scale: halves the size parameter" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    // scale(50) should halve the effective size; at size 100, effective = 50
+    // Use a slice generator where size controls length
+    const g = comptime scale([]const u8, @import("collections.zig").slice(u8, generators.int(u8), 100), 50);
+    var max_len: usize = 0;
+    for (0..100) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
+        if (v.len > max_len) max_len = v.len;
+    }
+    // With scale(50), effective size is 50, so max len should be ~50, not 100
+    try std.testing.expect(max_len <= 55);
 }
