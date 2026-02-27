@@ -264,6 +264,11 @@ pub const FunWith = combinators_mod.FunWith;
 pub const funGen = combinators_mod.funGen;
 pub const build = combinators_mod.build;
 pub const zip = combinators_mod.zip;
+pub const ZipResult = combinators_mod.ZipResult;
+pub const GenType = combinators_mod.GenType;
+pub const zipMap = combinators_mod.zipMap;
+pub const sliceOf = combinators_mod.sliceOf;
+pub const sliceOfRange = combinators_mod.sliceOfRange;
 pub const arrayOf = combinators_mod.arrayOf;
 
 // Collections and strings

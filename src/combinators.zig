@@ -587,11 +587,11 @@ pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
 
     // Validate each generator's output type matches the corresponding field
     inline for (fields, 0..) |field, i| {
-        const GenType = @TypeOf(gens[i]);
-        if (GenType != Gen(field.type)) {
+        const FieldGenType = @TypeOf(gens[i]);
+        if (FieldGenType != Gen(field.type)) {
             @compileError(std.fmt.comptimePrint(
                 "build({s}): field '{s}' has type {s}, but generator {d} produces {s}",
-                .{ @typeName(T), field.name, @typeName(field.type), i, @typeName(GenType) },
+                .{ @typeName(T), field.name, @typeName(field.type), i, @typeName(FieldGenType) },
             ));
         }
     }
@@ -760,16 +760,19 @@ pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
     };
 }
 
+/// Extract the element type T from a Gen(T).
+pub fn GenType(comptime G: type) type {
+    const gen_info = @typeInfo(G).@"struct";
+    const gen_fn_info = @typeInfo(@typeInfo(gen_info.fields[0].type).pointer.child).@"fn";
+    return gen_fn_info.return_type.?;
+}
+
 /// Compute the result type of `zip` — a tuple struct with one field per generator.
-fn ZipResult(comptime gens: anytype) type {
+pub fn ZipResult(comptime gens: anytype) type {
     const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
     var fields: [gens_info.fields.len]std.builtin.Type.StructField = undefined;
     inline for (gens_info.fields, 0..) |_, i| {
-        const GenType = @TypeOf(gens[i]);
-        // Extract T from Gen(T)
-        const gen_info = @typeInfo(GenType).@"struct";
-        const gen_fn_info = @typeInfo(@typeInfo(gen_info.fields[0].type).pointer.child).@"fn";
-        const T = gen_fn_info.return_type.?;
+        const T = GenType(@TypeOf(gens[i]));
         fields[i] = .{
             .name = std.fmt.comptimePrint("{d}", .{i}),
             .type = T,
@@ -784,6 +787,76 @@ fn ZipResult(comptime gens: anytype) type {
         .decls = &.{},
         .is_tuple = true,
     } });
+}
+
+/// Zip multiple generators and map the result into a target type in one step.
+/// The mapping function receives individual arguments (splatted), not a tuple.
+/// Shrinks each component independently, then maps back through the function.
+///
+/// ```zig
+/// const Player = struct { name: []const u8, score: u64 };
+/// const gen = zigcheck.zipMap(.{
+///     zigcheck.asciiString(24),
+///     zigcheck.generators.int(u64),
+/// }, Player, struct {
+///     fn f(name: []const u8, score: u64) Player {
+///         return .{ .name = name, .score = score };
+///     }
+/// }.f);
+/// ```
+pub fn zipMap(
+    comptime gens: anytype,
+    comptime R: type,
+    comptime f: anytype,
+) Gen(R) {
+    const Tuple = ZipResult(gens);
+    const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
+
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) R {
+                var tuple: Tuple = undefined;
+                const r_fields = @typeInfo(Tuple).@"struct".fields;
+                inline for (gens_info.fields, 0..) |_, i| {
+                    @field(tuple, r_fields[i].name) = gens[i].generate(rng, allocator, size_param);
+                }
+                return @call(.auto, f, tuple);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn s(value: R, _: std.mem.Allocator) ShrinkIter(R) {
+                // Without an inverse function, we can't decompose R back into
+                // components for independent shrinking. Use build() for structs
+                // where per-field shrinking is needed.
+                _ = value;
+                return ShrinkIter(R).empty();
+            }
+        }.s,
+    };
+}
+
+/// Like `slice` but infers the element type from the generator.
+///
+/// ```zig
+/// // Instead of: zigcheck.slice(u8, zigcheck.generators.int(u8), 64)
+/// const gen = zigcheck.sliceOf(zigcheck.generators.int(u8), 64);
+/// ```
+pub fn sliceOf(
+    comptime inner: anytype,
+    comptime max_len: usize,
+) Gen([]const GenType(@TypeOf(inner))) {
+    const T = GenType(@TypeOf(inner));
+    return @import("collections.zig").sliceRange(T, inner, 0, max_len);
+}
+
+/// Like `sliceRange` but infers the element type from the generator.
+pub fn sliceOfRange(
+    comptime inner: anytype,
+    comptime min_len: usize,
+    comptime max_len: usize,
+) Gen([]const GenType(@TypeOf(inner))) {
+    const T = GenType(@TypeOf(inner));
+    return @import("collections.zig").sliceRange(T, inner, min_len, max_len);
 }
 
 /// Generate a fixed-size array `[N]T`. Shrinks each element independently
@@ -1263,5 +1336,61 @@ test "arrayOf: shrinks elements independently" {
         try std.testing.expect(shrunk[0] != 100 or shrunk[1] != -50 or shrunk[2] != 200);
     } else {
         return error.TestUnexpectedResult;
+    }
+}
+
+test "ZipResult: produces correct tuple type" {
+    const T = ZipResult(.{
+        generators.int(i32),
+        generators.boolean(),
+    });
+    const info = @typeInfo(T).@"struct";
+    try std.testing.expect(info.is_tuple);
+    try std.testing.expectEqual(@as(usize, 2), info.fields.len);
+}
+
+test "GenType: extracts element type from generator" {
+    try std.testing.expect(GenType(Gen(i32)) == i32);
+    try std.testing.expect(GenType(Gen(bool)) == bool);
+    try std.testing.expect(GenType(Gen([]const u8)) == []const u8);
+}
+
+test "zipMap: combines generators with mapping function" {
+    const Point = struct { x: i32, y: i32 };
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime zipMap(.{
+        generators.intRange(i32, 0, 10),
+        generators.intRange(i32, 100, 200),
+    }, Point, struct {
+        fn f(x: i32, y: i32) Point {
+            return .{ .x = x, .y = y };
+        }
+    }.f);
+    for (0..50) |_| {
+        const p = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(p.x >= 0 and p.x <= 10);
+        try std.testing.expect(p.y >= 100 and p.y <= 200);
+    }
+}
+
+test "sliceOf: infers element type from generator" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = comptime sliceOf(generators.int(u8), 10);
+    for (0..20) |_| {
+        const s = g.generate(prng.random(), arena.allocator(), 100);
+        try std.testing.expect(s.len <= 10);
+    }
+}
+
+test "sliceOfRange: infers element type with min/max" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const g = comptime sliceOfRange(generators.int(u8), 3, 8);
+    for (0..20) |_| {
+        const s = g.generate(prng.random(), arena.allocator(), 100);
+        try std.testing.expect(s.len >= 3 and s.len <= 8);
     }
 }

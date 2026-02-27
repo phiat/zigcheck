@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-153%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-159%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -115,7 +115,9 @@ my_tests.root_module.addImport("zigcheck", zigcheck_mod);
 | `unicodeChar()` | `Gen(u21)` | Random Unicode code point (excludes surrogates) |
 | `unicodeString(max_cps)` | `Gen([]const u8)` | Valid UTF-8 string up to `max_cps` code points |
 
-Slice shrinking removes chunks (halves, quarters, eighths, ..., single elements), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed:
+Slice shrinking removes chunks (halves, quarters, eighths, ..., single elements), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed.
+
+**Tip:** Use `sliceOfRange(gen, 1, max)` when your property needs at least one element — `sliceOf(gen, max)` can shrink to empty, which may cause `for (1..s.len)` to overflow.
 
 ```zig
 try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
@@ -179,6 +181,9 @@ const Money = struct {
 | `build(T, gens)` | `Gen(T)` | Struct builder with per-field generators (shrinks independently) |
 | `zip(gens)` | `Gen(Tuple)` | Combine generators into a tuple `Gen(struct { A, B, ... })` |
 | `arrayOf(T, gen, N)` | `Gen([N]T)` | Fixed-size array with per-element shrinking |
+| `zipMap(gens, R, fn)` | `Gen(R)` | Zip generators + map with splatted args |
+| `sliceOf(gen, max)` | `Gen([]const T)` | Like `slice` but infers element type |
+| `sliceOfRange(gen, min, max)` | `Gen([]const T)` | Like `sliceRange` but infers element type |
 
 ```zig
 // Only test with positive even numbers
@@ -330,6 +335,8 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 | `check(config, T, gen, property)` | Return `CheckResult` without failing |
 | `check2(config, A, B, gen_a, gen_b, property)` | Two-argument check returning result |
 | `check3(config, A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument check returning result |
+| `forAllZip(gens, property)` | N-argument property with splatted args (generalizes forAll2/forAll3) |
+| `forAllZipWith(config, gens, property)` | N-argument property with explicit config |
 | `recheck(T, gen, property, result)` | Replay a failed `CheckResult` (QuickCheck `recheck`) |
 
 ### Property helpers

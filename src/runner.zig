@@ -988,6 +988,50 @@ pub fn disjoin(
     }
 }
 
+// -- N-argument properties via zip ----------------------------------------
+
+/// Run a property check with N generators using zip. The property receives
+/// individual arguments (splatted), not a tuple. Generalizes forAll2/forAll3
+/// to any number of generators.
+///
+/// ```zig
+/// try zigcheck.forAllZip(.{
+///     zigcheck.generators.int(u8),
+///     zigcheck.generators.int(u64),
+///     zigcheck.generators.boolean(),
+/// }, struct {
+///     fn prop(a: u8, b: u64, c: bool) !void { ... }
+/// }.prop);
+/// ```
+pub fn forAllZip(comptime gens: anytype, comptime property: anytype) !void {
+    return forAllZipWith(.{}, gens, property);
+}
+
+/// Run a zipped property check with explicit config.
+pub fn forAllZipWith(config: Config, comptime gens: anytype, comptime property: anytype) !void {
+    const combinators = @import("combinators.zig");
+    const Tuple = combinators.ZipResult(gens);
+    const zipped = comptime combinators.zip(gens);
+
+    const result = check(config, Tuple, zipped, struct {
+        fn wrapper(tuple: Tuple) anyerror!void {
+            return @call(.auto, property, tuple);
+        }
+    }.wrapper);
+
+    switch (result) {
+        .passed => {},
+        .failed => |f| {
+            logFailure(f.num_tests_before_fail, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, f.seed);
+            return error.PropertyFalsified;
+        },
+        .gave_up => |g| {
+            logGaveUp(g.num_tests, g.num_discarded);
+            return error.GaveUp;
+        },
+    }
+}
+
 // -- Multi-argument properties --------------------------------------------
 
 pub fn CheckResult2(comptime A: type, comptime B: type) type {
@@ -1947,6 +1991,20 @@ test "forAllCtx: coverage failure" {
         }.prop,
     ));
     try std.testing.expectError(error.InsufficientCoverage, result);
+}
+
+test "forAllZip: N generators with splatted args" {
+    try forAllZipWith(.{ .seed = 42, .num_tests = 50 }, .{
+        generators.intRange(i32, 0, 100),
+        generators.boolean(),
+        generators.intRange(u8, 0, 10),
+    }, struct {
+        fn prop(n: i32, b: bool, x: u8) !void {
+            _ = b;
+            if (n < 0 or n > 100) return error.PropertyFalsified;
+            if (x > 10) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 
 test "within: fast property passes" {
