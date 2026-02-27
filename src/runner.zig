@@ -749,6 +749,186 @@ pub fn forAllTabulate(
     }.tabulateClassifier);
 }
 
+// -- Composable labeling via PropertyContext ------------------------------
+
+/// A context object passed to property functions that enables composable
+/// classify/cover/label calls inside the property itself, rather than
+/// requiring a separate classifier function.
+///
+/// This is zigcheck's equivalent of QuickCheck's monadic property style:
+///
+/// ```zig
+/// try zigcheck.forAllCtx(i32, zigcheck.generators.int(i32), struct {
+///     fn prop(n: i32, ctx: *zigcheck.PropertyContext) !void {
+///         ctx.classify(if (n > 0) "positive" else if (n < 0) "negative" else "zero");
+///         ctx.cover("positive", 30.0);
+///         ctx.cover("negative", 30.0);
+///         ctx.tabulate("magnitude", if (@abs(n) > 100) "large" else "small");
+///         if (n == std.math.maxInt(i32)) return error.PropertyFalsified;
+///     }
+/// }.prop);
+/// ```
+pub const PropertyContext = struct {
+    label_map: std.StringHashMap(usize),
+    cover_reqs: std.StringHashMap(f64),
+    tables: std.StringHashMap(std.StringHashMap(usize)),
+    alloc: std.mem.Allocator,
+    num_tests_so_far: usize,
+
+    pub fn init(alloc: std.mem.Allocator) PropertyContext {
+        return .{
+            .label_map = std.StringHashMap(usize).init(alloc),
+            .cover_reqs = std.StringHashMap(f64).init(alloc),
+            .tables = std.StringHashMap(std.StringHashMap(usize)).init(alloc),
+            .alloc = alloc,
+            .num_tests_so_far = 0,
+        };
+    }
+
+    /// Add a label to the current test case (like QuickCheck's `label`).
+    pub fn label(self: *PropertyContext, name: []const u8) void {
+        const entry = self.label_map.getOrPut(name) catch return;
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+
+    /// Classify the current test case with a label (alias for `label`).
+    pub fn classify(self: *PropertyContext, name: []const u8) void {
+        self.label(name);
+    }
+
+    /// Register a minimum coverage requirement for a label.
+    /// If the label's actual coverage falls below `min_pct`, the test fails.
+    pub fn cover(self: *PropertyContext, name: []const u8, min_pct: f64) void {
+        self.cover_reqs.put(name, min_pct) catch return;
+    }
+
+    /// Add a label under a named table (like QuickCheck's `tabulate`).
+    pub fn tabulate(self: *PropertyContext, table_name: []const u8, name: []const u8) void {
+        const table_entry = self.tables.getOrPut(table_name) catch return;
+        if (!table_entry.found_existing) {
+            table_entry.value_ptr.* = std.StringHashMap(usize).init(self.alloc);
+        }
+        const entry = table_entry.value_ptr.getOrPut(name) catch return;
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+
+    /// Check coverage requirements. Returns an error message if any requirement is not met.
+    fn checkCoverage(self: *PropertyContext) ?[]const u8 {
+        if (self.num_tests_so_far == 0) return null;
+        var iter = self.cover_reqs.iterator();
+        while (iter.next()) |req| {
+            const count = self.label_map.get(req.key_ptr.*) orelse 0;
+            const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(self.num_tests_so_far)) * 100.0;
+            if (pct < req.value_ptr.*) {
+                return std.fmt.allocPrint(
+                    self.alloc,
+                    "Insufficient coverage for \"{s}\": {d:.1}% (need {d:.1}%)",
+                    .{ req.key_ptr.*, pct, req.value_ptr.* },
+                ) catch return req.key_ptr.*;
+            }
+        }
+        return null;
+    }
+
+    /// Print coverage report.
+    fn printReport(self: *PropertyContext) void {
+        if (self.label_map.count() > 0) {
+            std.log.info("zigcheck: {d} tests, coverage:", .{self.num_tests_so_far});
+            var iter = self.label_map.iterator();
+            while (iter.next()) |entry| {
+                const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(self.num_tests_so_far)) * 100.0;
+                std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
+            }
+        }
+        // Print tabulated results
+        var table_iter = self.tables.iterator();
+        while (table_iter.next()) |table_entry| {
+            std.log.info("zigcheck: Table \"{s}\":", .{table_entry.key_ptr.*});
+            var entry_iter = table_entry.value_ptr.iterator();
+            while (entry_iter.next()) |entry| {
+                const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(self.num_tests_so_far)) * 100.0;
+                std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
+            }
+        }
+    }
+};
+
+/// Run a property check with a `PropertyContext` for composable labeling.
+/// The property receives both the generated value and a context for
+/// classify/cover/label/tabulate calls.
+pub fn forAllCtx(
+    comptime T: type,
+    gen: Gen(T),
+    comptime property: *const fn (T, *PropertyContext) anyerror!void,
+) !void {
+    return forAllCtxWith(.{}, T, gen, property);
+}
+
+/// Run a context property check with explicit config.
+pub fn forAllCtxWith(
+    config: Config,
+    comptime T: type,
+    gen: Gen(T),
+    comptime property: *const fn (T, *PropertyContext) anyerror!void,
+) !void {
+    var ctx_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer ctx_arena.deinit();
+    const alloc = ctx_arena.allocator();
+
+    var ctx = PropertyContext.init(alloc);
+
+    const seed = resolveSeed(config);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
+
+    var tests_run: usize = 0;
+    var discards: usize = 0;
+
+    while (tests_run < config.num_tests) {
+        if (discards >= config.max_discard) {
+            logGaveUp(tests_run, discards);
+            return error.GaveUp;
+        }
+
+        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const value = gen.generate(rng, gen_alloc, size);
+
+        if (property(value, &ctx)) |_| {
+            tests_run += 1;
+            ctx.num_tests_so_far = tests_run;
+        } else |err| {
+            if (err == TestDiscarded) {
+                discards += 1;
+                continue;
+            }
+            // Shrink using a wrapper that ignores the context
+            const shrunk = doShrink(T, gen, struct {
+                fn wrapper(v: T) anyerror!void {
+                    var dummy_ctx = PropertyContext.init(std.heap.page_allocator);
+                    return property(v, &dummy_ctx);
+                }
+            }.wrapper, value, config.max_shrinks, config.verbose_shrink);
+            logFailure(tests_run + 1, "{any}", .{shrunk.value}, "{any}", .{value}, shrunk.steps, seed);
+            return error.PropertyFalsified;
+        }
+    }
+
+    // Check coverage requirements
+    if (ctx.checkCoverage()) |msg| {
+        std.log.info("zigcheck: insufficient coverage: {s}", .{msg});
+        return error.InsufficientCoverage;
+    }
+
+    // Print coverage report
+    ctx.printReport();
+}
+
 // -- Property conjunction / disjunction -----------------------------------
 
 /// Run multiple properties on the same generated values. All must hold (conjunction).
@@ -1731,6 +1911,42 @@ test "verbose mode determinism: same results as non-verbose" {
         },
         .gave_up => return error.TestUnexpectedResult,
     }
+}
+
+test "forAllCtx: composable classify and cover" {
+    // Use PropertyContext to classify inside the property itself
+    try forAllCtxWith(.{ .seed = 42, .num_tests = 200 }, i32, generators.int(i32), struct {
+        fn prop(n: i32, ctx: *PropertyContext) !void {
+            ctx.classify(if (n > 0) "positive" else if (n < 0) "negative" else "zero");
+            ctx.cover("positive", 20.0);
+            ctx.cover("negative", 20.0);
+        }
+    }.prop);
+}
+
+test "forAllCtx: tabulate groups labels" {
+    try forAllCtxWith(.{ .seed = 42, .num_tests = 100 }, u32, generators.intRange(u32, 0, 100), struct {
+        fn prop(n: u32, ctx: *PropertyContext) !void {
+            ctx.tabulate("size", if (n > 50) "large" else "small");
+        }
+    }.prop);
+}
+
+test "forAllCtx: coverage failure" {
+    // A property that never labels "rare" should fail coverage check
+    const result = @as(anyerror!void, forAllCtxWith(
+        .{ .seed = 42, .num_tests = 50 },
+        u32,
+        generators.intRange(u32, 0, 100),
+        struct {
+            fn prop(n: u32, ctx: *PropertyContext) !void {
+                ctx.classify(if (n > 50) "common" else "other");
+                // Require a label that will never be applied
+                ctx.cover("nonexistent", 10.0);
+            }
+        }.prop,
+    ));
+    try std.testing.expectError(error.InsufficientCoverage, result);
 }
 
 test "within: fast property passes" {

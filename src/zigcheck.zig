@@ -50,6 +50,9 @@ pub const forAllCollect = runner.forAllCollect;
 pub const forAllTabulate = runner.forAllTabulate;
 pub const conjoin = runner.conjoin;
 pub const disjoin = runner.disjoin;
+pub const PropertyContext = runner.PropertyContext;
+pub const forAllCtx = runner.forAllCtx;
+pub const forAllCtxWith = runner.forAllCtxWith;
 
 // -- Convenience re-exports -----------------------------------------------
 
@@ -109,6 +112,11 @@ pub const nonNegative = generators.nonNegative;
 pub const nonZero = generators.nonZero;
 pub const negative = generators.negative;
 
+// -- Stateful testing -----------------------------------------------------
+
+pub const StateMachine = @import("stateful.zig").StateMachine;
+pub const StatefulConfig = @import("stateful.zig").StatefulConfig;
+
 // -- Tests (pull in all modules for `zig build test`) ---------------------
 
 test {
@@ -116,4 +124,5 @@ test {
     _ = @import("generators.zig");
     _ = @import("shrink.zig");
     _ = @import("runner.zig");
+    _ = @import("stateful.zig");
 }

@@ -1,12 +1,12 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-142%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-147%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-38%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~90%25-informational)](#api)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
@@ -346,6 +346,30 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 | `conjoin(config, T, gen, properties)` | All properties must hold (`.&&.`) |
 | `disjoin(config, T, gen, properties)` | At least one must hold (`.||.`) |
 | `within(T, timeout_us, property)` | Fail if property takes longer than limit (QuickCheck `within`) |
+| `forAllCtx(T, gen, property)` | Property with `PropertyContext` for composable classify/cover/label |
+| `forAllCtxWith(config, T, gen, property)` | Context property with explicit config |
+
+### Stateful testing
+
+Test stateful APIs by generating random command sequences and verifying model invariants (QuickCheck's `Test.QuickCheck.Monadic` / Erlang QuickCheck's `eqc_statem`):
+
+```zig
+const Command = union(enum) { push: i32, pop };
+const Model = struct { size: usize = 0 };
+
+const Spec = zigcheck.StateMachine(Command, Model, *MyStack);
+try Spec.runWith(.{ .num_tests = 100, .max_commands = 30 }, .{
+    .init_model = initModel,
+    .init_sut = initStack,
+    .gen_command = genCmd,
+    .precondition = precond,
+    .run_command = runCmd,
+    .next_model = nextModel,
+    .postcondition = postCond,
+});
+```
+
+Failing sequences are automatically shrunk by removing chunks of commands (same strategy as slice shrinking), producing minimal counterexamples.
 
 ### Utility
 
@@ -372,6 +396,7 @@ src/
   auto.zig           # Auto-derivation (enum, struct, optional, union)
   shrink.zig         # ShrinkIter(T) and shrink state types
   runner.zig         # forAll/check engine with shrink loop
+  stateful.zig       # State machine testing (commands, model, postconditions)
 ```
 
 ## Development
