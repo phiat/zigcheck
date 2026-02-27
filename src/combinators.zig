@@ -539,6 +539,11 @@ pub fn funGen(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) Gen(Fu
 /// `fun.call(a)` hashes the input to perturb the seed and generates a
 /// deterministic B value. Different seeds produce different functions.
 /// Use `funGen(A, B, gen_b)` to generate these.
+///
+/// **Note:** `call()` uses a 4KB stack buffer for generation. If `gen_b`
+/// allocates more than 4KB (e.g., large slices or long strings), generation
+/// will fail silently. For generators that need more memory, use `gen_b`
+/// directly with a heap allocator instead of wrapping in `funGen`.
 pub fn FunWith(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) type {
     return struct {
         seed: u64,

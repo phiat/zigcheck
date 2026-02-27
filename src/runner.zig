@@ -503,8 +503,14 @@ pub fn checkLabeled(
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
-    // Track label counts using a hash map
+    // Track label counts using the caller's arena (keys must survive the loop).
     var label_map = std.StringHashMap(usize).init(arena_alloc);
+
+    // Separate arena for generated values — reset each iteration so only
+    // the current test case's allocations are live during classification.
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     var tests_run: usize = 0;
     var discards: usize = 0;
@@ -517,17 +523,23 @@ pub fn checkLabeled(
             } };
         }
 
+        _ = gen_arena.reset(.retain_capacity);
         const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
-        const value = gen.generate(rng, arena_alloc, size);
+        const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
             const labels = classifier(value);
             for (labels) |label| {
-                const entry = label_map.getOrPut(label) catch continue;
-                if (!entry.found_existing) {
-                    entry.value_ptr.* = 0;
+                const gop = label_map.getOrPut(label) catch continue;
+                if (!gop.found_existing) {
+                    // Dupe the key into the label arena so it survives gen_arena resets.
+                    gop.key_ptr.* = arena_alloc.dupe(u8, label) catch {
+                        _ = label_map.remove(label);
+                        continue;
+                    };
+                    gop.value_ptr.* = 0;
                 }
-                entry.value_ptr.* += 1;
+                gop.value_ptr.* += 1;
             }
             tests_run += 1;
         } else |err| {
