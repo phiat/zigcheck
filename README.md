@@ -13,27 +13,46 @@ Property-based testing for Zig. Generate random structured inputs, check propert
 ## Quick start
 
 ```zig
+const std = @import("std");
 const zigcheck = @import("zigcheck");
 
-test "addition is commutative" {
-    try zigcheck.forAll(i32, zigcheck.generators.int(i32), struct {
-        fn prop(n: i32) !void {
-            // This property holds for all integers
-            if (n +% 1 != 1 +% n) return error.PropertyFalsified;
+// Find bugs with auto-derived generators — no manual setup needed
+const Rect = struct { w: u16, h: u16 };
+
+test "area fits in u32" {
+    try zigcheck.forAll(Rect, zigcheck.generators.auto(Rect), struct {
+        fn prop(r: Rect) !void {
+            const area = @as(u32, r.w) * @as(u32, r.h);
+            if (area > std.math.maxInt(u16)) return error.PropertyFalsified;
         }
     }.prop);
 }
 ```
 
-When a property fails, zigcheck automatically shrinks the counterexample to a minimal reproduction:
+zigcheck finds a counterexample and **automatically shrinks** it to the smallest failing case:
 
 ```
---- zigcheck: FAILED after 3 tests ----------------------
-  Counterexample: 10
-  Shrunk (12 steps) from: 1847382901
+--- zigcheck: FAILED after 1 tests -------------------------
+  Counterexample: Rect{ .w = 256, .h = 256 }
+  Shrunk (24 steps) from: Rect{ .w = 42317, .h = 59820 }
   Reproduction seed: 0x2a
   Rerun with: .seed = 0x2a
--------------------------------------------------------
+-------------------------------------------------------------
+```
+
+Multi-argument properties with independent shrinking:
+
+```zig
+test "addition is commutative" {
+    try zigcheck.forAll2(i32, i32,
+        zigcheck.generators.int(i32), zigcheck.generators.int(i32),
+        struct {
+            fn prop(a: i32, b: i32) !void {
+                if (a +% b != b +% a) return error.PropertyFalsified;
+            }
+        }.prop,
+    );
+}
 ```
 
 ## Installation
