@@ -262,6 +262,9 @@ pub const mapSize = combinators_mod.mapSize;
 pub const suchThatMap = combinators_mod.suchThatMap;
 pub const FunWith = combinators_mod.FunWith;
 pub const funGen = combinators_mod.funGen;
+pub const build = combinators_mod.build;
+pub const zip = combinators_mod.zip;
+pub const arrayOf = combinators_mod.arrayOf;
 
 // Collections and strings
 pub const asciiChar = collections_mod.asciiChar;

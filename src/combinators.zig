@@ -560,6 +560,315 @@ pub fn FunWith(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) type 
     };
 }
 
+// -- Struct / tuple / array builders --------------------------------------
+
+/// Build a generator for struct type T using explicit per-field generators.
+/// Like `auto(T)` but with custom generators for each field.
+/// Shrinks each field independently through its generator's shrinker.
+///
+/// ```zig
+/// const Point = struct { x: i32, y: i32 };
+/// const gen = zigcheck.build(Point, .{
+///     zigcheck.generators.intRange(i32, 0, 100),  // x: constrained
+///     zigcheck.generators.int(i32),                // y: full range
+/// });
+/// ```
+pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
+    const struct_info = @typeInfo(T).@"struct";
+    const fields = struct_info.fields;
+    const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
+
+    if (gens_info.fields.len != fields.len) {
+        @compileError(std.fmt.comptimePrint(
+            "build({s}): expected {d} generators (one per field), got {d}",
+            .{ @typeName(T), fields.len, gens_info.fields.len },
+        ));
+    }
+
+    // Validate each generator's output type matches the corresponding field
+    inline for (fields, 0..) |field, i| {
+        const GenType = @TypeOf(gens[i]);
+        if (GenType != Gen(field.type)) {
+            @compileError(std.fmt.comptimePrint(
+                "build({s}): field '{s}' has type {s}, but generator {d} produces {s}",
+                .{ @typeName(T), field.name, @typeName(field.type), i, @typeName(GenType) },
+            ));
+        }
+    }
+
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) T {
+                var result: T = undefined;
+                inline for (fields, 0..) |field, i| {
+                    @field(result, field.name) = gens[i].generate(rng, allocator, size_param);
+                }
+                return result;
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
+                if (fields.len == 0) return ShrinkIter(T).empty();
+
+                const iters = allocator.alloc(ShrinkIter(T), fields.len) catch return ShrinkIter(T).empty();
+
+                inline for (fields, 0..) |field, i| {
+                    const Mapper = struct {
+                        original: T,
+                        field_shrinker: ShrinkIter(field.type),
+
+                        fn nextMapped(ctx: *anyopaque) ?T {
+                            const self: *@This() = @ptrCast(@alignCast(ctx));
+                            if (self.field_shrinker.next()) |shrunk_val| {
+                                var result = self.original;
+                                @field(result, field.name) = shrunk_val;
+                                return result;
+                            }
+                            return null;
+                        }
+                    };
+                    const mapper = allocator.create(Mapper) catch return ShrinkIter(T).empty();
+                    mapper.* = .{
+                        .original = value,
+                        .field_shrinker = gens[i].shrink(@field(value, field.name), allocator),
+                    };
+                    iters[i] = .{
+                        .context = @ptrCast(mapper),
+                        .nextFn = Mapper.nextMapped,
+                    };
+                }
+
+                const ChainState = struct {
+                    iters_arr: []ShrinkIter(T),
+                    pos: usize,
+
+                    fn nextChain(ctx: *anyopaque) ?T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        while (self.pos < self.iters_arr.len) {
+                            if (self.iters_arr[self.pos].next()) |val| {
+                                return val;
+                            }
+                            self.pos += 1;
+                        }
+                        return null;
+                    }
+                };
+                const chain = allocator.create(ChainState) catch return ShrinkIter(T).empty();
+                chain.* = .{ .iters_arr = iters, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(chain),
+                    .nextFn = ChainState.nextChain,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Combine multiple generators into a generator of a tuple struct.
+/// Returns `Gen(struct { @"0": A, @"1": B, ... })`.
+///
+/// Use when you need multiple generated values together but don't have
+/// a named struct type. Access fields with `result[0]`, `result[1]`, etc.
+///
+/// ```zig
+/// const gen = zigcheck.zip(.{
+///     zigcheck.generators.int(i32),
+///     zigcheck.asciiString(10),
+///     zigcheck.generators.boolean(),
+/// });
+/// try zigcheck.forAll(@TypeOf(gen).T, gen, struct {
+///     fn prop(t: anytype) !void {
+///         const n = t[0];
+///         const s = t[1];
+///         const b = t[2];
+///         _ = .{ n, s, b };
+///     }
+/// }.prop);
+/// ```
+pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
+    const R = ZipResult(gens);
+    const r_fields = @typeInfo(R).@"struct".fields;
+    const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
+
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) R {
+                var result: R = undefined;
+                inline for (gens_info.fields, 0..) |_, i| {
+                    @field(result, r_fields[i].name) = gens[i].generate(rng, allocator, size_param);
+                }
+                return result;
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: R, allocator: std.mem.Allocator) ShrinkIter(R) {
+                if (r_fields.len == 0) return ShrinkIter(R).empty();
+
+                const iters = allocator.alloc(ShrinkIter(R), r_fields.len) catch return ShrinkIter(R).empty();
+
+                inline for (r_fields, 0..) |field, i| {
+                    const Mapper = struct {
+                        original: R,
+                        field_shrinker: ShrinkIter(field.type),
+
+                        fn nextMapped(ctx: *anyopaque) ?R {
+                            const self: *@This() = @ptrCast(@alignCast(ctx));
+                            if (self.field_shrinker.next()) |shrunk_val| {
+                                var result = self.original;
+                                @field(result, field.name) = shrunk_val;
+                                return result;
+                            }
+                            return null;
+                        }
+                    };
+                    const mapper = allocator.create(Mapper) catch return ShrinkIter(R).empty();
+                    mapper.* = .{
+                        .original = value,
+                        .field_shrinker = gens[i].shrink(@field(value, field.name), allocator),
+                    };
+                    iters[i] = .{
+                        .context = @ptrCast(mapper),
+                        .nextFn = Mapper.nextMapped,
+                    };
+                }
+
+                const ChainState = struct {
+                    iters_arr: []ShrinkIter(R),
+                    pos: usize,
+
+                    fn nextChain(ctx: *anyopaque) ?R {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        while (self.pos < self.iters_arr.len) {
+                            if (self.iters_arr[self.pos].next()) |val| {
+                                return val;
+                            }
+                            self.pos += 1;
+                        }
+                        return null;
+                    }
+                };
+                const chain = allocator.create(ChainState) catch return ShrinkIter(R).empty();
+                chain.* = .{ .iters_arr = iters, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(chain),
+                    .nextFn = ChainState.nextChain,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Compute the result type of `zip` — a tuple struct with one field per generator.
+fn ZipResult(comptime gens: anytype) type {
+    const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
+    var fields: [gens_info.fields.len]std.builtin.Type.StructField = undefined;
+    inline for (gens_info.fields, 0..) |_, i| {
+        const GenType = @TypeOf(gens[i]);
+        // Extract T from Gen(T)
+        const gen_info = @typeInfo(GenType).@"struct";
+        const gen_fn_info = @typeInfo(@typeInfo(gen_info.fields[0].type).pointer.child).@"fn";
+        const T = gen_fn_info.return_type.?;
+        fields[i] = .{
+            .name = std.fmt.comptimePrint("{d}", .{i}),
+            .type = T,
+            .default_value_ptr = null,
+            .is_comptime = false,
+            .alignment = @alignOf(T),
+        };
+    }
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &fields,
+        .decls = &.{},
+        .is_tuple = true,
+    } });
+}
+
+/// Generate a fixed-size array `[N]T`. Shrinks each element independently
+/// through the inner generator's shrinker.
+///
+/// ```zig
+/// const gen = zigcheck.arrayOf(i32, zigcheck.generators.int(i32), 5);
+/// // Generates [5]i32 arrays, shrinks each element toward zero
+/// ```
+pub fn arrayOf(
+    comptime T: type,
+    comptime inner: Gen(T),
+    comptime N: usize,
+) Gen([N]T) {
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) [N]T {
+                var result: [N]T = undefined;
+                for (&result) |*slot| {
+                    slot.* = inner.generate(rng, allocator, size_param);
+                }
+                return result;
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: [N]T, allocator: std.mem.Allocator) ShrinkIter([N]T) {
+                if (N == 0) return ShrinkIter([N]T).empty();
+
+                // Shrink each element independently, yielding the full array
+                // with one element shrunk at a time
+                const iters = allocator.alloc(ShrinkIter([N]T), N) catch return ShrinkIter([N]T).empty();
+
+                inline for (0..N) |i| {
+                    const Mapper = struct {
+                        original: [N]T,
+                        elem_shrinker: ShrinkIter(T),
+
+                        fn nextMapped(ctx: *anyopaque) ?[N]T {
+                            const self: *@This() = @ptrCast(@alignCast(ctx));
+                            if (self.elem_shrinker.next()) |shrunk_val| {
+                                var result = self.original;
+                                result[i] = shrunk_val;
+                                return result;
+                            }
+                            return null;
+                        }
+                    };
+                    const mapper = allocator.create(Mapper) catch return ShrinkIter([N]T).empty();
+                    mapper.* = .{
+                        .original = value,
+                        .elem_shrinker = inner.shrink(value[i], allocator),
+                    };
+                    iters[i] = .{
+                        .context = @ptrCast(mapper),
+                        .nextFn = Mapper.nextMapped,
+                    };
+                }
+
+                const ChainState = struct {
+                    iters_arr: []ShrinkIter([N]T),
+                    pos: usize,
+
+                    fn nextChain(ctx: *anyopaque) ?[N]T {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        while (self.pos < self.iters_arr.len) {
+                            if (self.iters_arr[self.pos].next()) |val| {
+                                return val;
+                            }
+                            self.pos += 1;
+                        }
+                        return null;
+                    }
+                };
+                const chain = allocator.create(ChainState) catch return ShrinkIter([N]T).empty();
+                chain.* = .{ .iters_arr = iters, .pos = 0 };
+
+                return .{
+                    .context = @ptrCast(chain),
+                    .nextFn = ChainState.nextChain,
+                };
+            }
+        }.f,
+    };
+}
+
 // -- Tests ----------------------------------------------------------------
 
 test "constant: always produces the same value" {
@@ -859,4 +1168,100 @@ test "funGen: different seeds produce different functions" {
         if (f1.call(@intCast(i)) != f2.call(@intCast(i))) disagree += 1;
     }
     try std.testing.expect(disagree > 5);
+}
+
+test "build: generates struct with custom per-field generators" {
+    const Point = struct { x: i32, y: i32 };
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime build(Point, .{
+        generators.intRange(i32, 0, 10), // x: small range
+        generators.intRange(i32, 100, 200), // y: different range
+    });
+    for (0..50) |_| {
+        const p = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(p.x >= 0 and p.x <= 10);
+        try std.testing.expect(p.y >= 100 and p.y <= 200);
+    }
+}
+
+test "build: shrinks each field independently" {
+    const Point = struct { x: i32, y: i32 };
+    const g = comptime build(Point, .{
+        generators.int(i32),
+        generators.int(i32),
+    });
+    const value = Point{ .x = 100, .y = -50 };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var iter = g.shrink(value, arena.allocator());
+    // First shrink candidates should try shrinking x (first field)
+    if (iter.next()) |shrunk| {
+        // x should be shrunk while y stays the same
+        try std.testing.expectEqual(@as(i32, -50), shrunk.y);
+        try std.testing.expect(shrunk.x != 100 or shrunk.y != -50);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "zip: combines generators into tuple" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime zip(.{
+        generators.intRange(i32, 0, 10),
+        generators.boolean(),
+    });
+    for (0..50) |_| {
+        const t = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expect(t[0] >= 0 and t[0] <= 10);
+        // t[1] is bool, always valid
+        _ = t[1];
+    }
+}
+
+test "zip: shrinks tuple elements independently" {
+    const g = comptime zip(.{
+        generators.int(i32),
+        generators.int(u8),
+    });
+    const T = ZipResult(.{
+        generators.int(i32),
+        generators.int(u8),
+    });
+    const value: T = .{ 100, 50 };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var iter = g.shrink(value, arena.allocator());
+    if (iter.next()) |shrunk| {
+        // Should have shrunk one of the elements
+        try std.testing.expect(shrunk[0] != 100 or shrunk[1] != 50);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "arrayOf: generates fixed-size arrays" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = comptime arrayOf(i32, generators.intRange(i32, 0, 100), 5);
+    for (0..50) |_| {
+        const arr = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expectEqual(@as(usize, 5), arr.len);
+        for (arr) |v| {
+            try std.testing.expect(v >= 0 and v <= 100);
+        }
+    }
+}
+
+test "arrayOf: shrinks elements independently" {
+    const g = comptime arrayOf(i32, generators.int(i32), 3);
+    const value = [3]i32{ 100, -50, 200 };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var iter = g.shrink(value, arena.allocator());
+    if (iter.next()) |shrunk| {
+        // Array length stays 3, but an element should be shrunk
+        try std.testing.expectEqual(@as(usize, 3), shrunk.len);
+        try std.testing.expect(shrunk[0] != 100 or shrunk[1] != -50 or shrunk[2] != 200);
+    } else {
+        return error.TestUnexpectedResult;
+    }
 }

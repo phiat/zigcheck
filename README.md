@@ -1,10 +1,10 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-147%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-153%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
-[![Generators](https://img.shields.io/badge/generators-38%2B-blueviolet)](#generators)
+[![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
 
@@ -176,6 +176,9 @@ const Money = struct {
 | `mapSize(T, gen, fn)` | `Gen(T)` | Transform size parameter with a function |
 | `suchThatMap(A, B, gen, fn)` | `Gen(B)` | Filter and transform in one step |
 | `funGen(A, B, gen_b)` | `Gen(FunWith(A,B,gen_b))` | Generate random pure functions (QuickCheck `Fun`) |
+| `build(T, gens)` | `Gen(T)` | Struct builder with per-field generators (shrinks independently) |
+| `zip(gens)` | `Gen(Tuple)` | Combine generators into a tuple `Gen(struct { A, B, ... })` |
+| `arrayOf(T, gen, N)` | `Gen([N]T)` | Fixed-size array with per-element shrinking |
 
 ```zig
 // Only test with positive even numbers

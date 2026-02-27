@@ -96,6 +96,9 @@ pub const mapSize = generators.mapSize;
 pub const suchThatMap = generators.suchThatMap;
 pub const FunWith = generators.FunWith;
 pub const funGen = generators.funGen;
+pub const build = generators.build;
+pub const zip = generators.zip;
+pub const arrayOf = generators.arrayOf;
 pub const unicodeChar = generators.unicodeChar;
 pub const unicodeString = generators.unicodeString;
 
