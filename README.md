@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-30%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~90%25-informational)](#api)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~75%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
