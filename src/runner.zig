@@ -338,18 +338,23 @@ pub fn check(
         const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
         const value = gen.generate(rng, gen_alloc, size);
 
-        if (config.verbose) {
-            std.log.info("zigcheck: test {d}/{d}: {any}", .{ tests_run + 1, config.num_tests, value });
-        }
-
         // Test the property
         if (property(value)) |_| {
             // passed, continue
             tests_run += 1;
+            if (config.verbose) {
+                std.log.info("zigcheck: test {d}/{d} (size {d}): PASS {any}", .{ tests_run, config.num_tests, size, value });
+            }
         } else |err| {
             if (err == TestDiscarded) {
                 discards += 1;
+                if (config.verbose) {
+                    std.log.info("zigcheck: test {d}/{d} (size {d}): DISCARD {any}", .{ tests_run + 1, config.num_tests, size, value });
+                }
                 continue;
+            }
+            if (config.verbose) {
+                std.log.info("zigcheck: test {d}/{d} (size {d}): FAIL {any}", .{ tests_run + 1, config.num_tests, size, value });
             }
             // Property failed -- the arena still holds the failing value's
             // allocations. Pass it directly to doShrink (which uses its own

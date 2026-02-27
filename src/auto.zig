@@ -10,7 +10,27 @@ const collections = @import("collections.zig");
 /// Auto-derive a generator for any supported type via comptime reflection.
 /// Supports: int, float, bool, enum, struct, optional (?T), pointer-to-slice
 /// ([]const T), and tagged unions (union(enum)).
+///
+/// **Custom generators:** If a struct or union declares a `pub const zigcheck_gen`
+/// field of type `Gen(Self)`, `auto()` will use that instead of reflection.
+/// This is the Zig-idiomatic equivalent of Haskell's `Arbitrary` typeclass.
+///
+/// ```zig
+/// const MyType = struct {
+///     x: i32,
+///     y: i32,
+///     pub const zigcheck_gen = Gen(MyType){
+///         .genFn = ...,
+///         .shrinkFn = ...,
+///     };
+/// };
+/// const g = zigcheck.auto(MyType); // uses MyType.zigcheck_gen
+/// ```
 pub fn auto(comptime T: type) Gen(T) {
+    // Check for user-provided generator first (convention-based extensibility)
+    if (@typeInfo(T) == .@"struct" or @typeInfo(T) == .@"union" or @typeInfo(T) == .@"enum") {
+        if (@hasDecl(T, "zigcheck_gen")) return T.zigcheck_gen;
+    }
     return switch (@typeInfo(T)) {
         .int => generators.int(T),
         .float => generators.float(T),
@@ -715,5 +735,35 @@ test "shrink boundary: struct shrinks fields independently" {
             try std.testing.expectEqual(@as(u32, 5), f.shrunk.y);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "auto: respects zigcheck_gen convention" {
+    // A struct that provides its own generator via convention.
+    // auto() should use zigcheck_gen instead of deriving from fields.
+    const AlwaysFortyTwo = struct {
+        value: u32,
+
+        const Self = @This();
+        pub const zigcheck_gen = Gen(Self){
+            .genFn = &struct {
+                fn f(_: std.Random, _: std.mem.Allocator, _: usize) Self {
+                    return .{ .value = 42 };
+                }
+            }.f,
+            .shrinkFn = &struct {
+                fn f(_: Self, _: std.mem.Allocator) @import("shrink.zig").ShrinkIter(Self) {
+                    return @import("shrink.zig").ShrinkIter(Self).empty();
+                }
+            }.f,
+        };
+    };
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = auto(AlwaysFortyTwo);
+    // Custom generator always produces 42
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 100);
+        try std.testing.expectEqual(@as(u32, 42), v.value);
     }
 }

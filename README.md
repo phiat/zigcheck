@@ -1,12 +1,12 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-136%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-142%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
-[![Generators](https://img.shields.io/badge/generators-35%2B-blueviolet)](#generators)
+[![Generators](https://img.shields.io/badge/generators-38%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~88%25-informational)](#api)
+[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~90%25-informational)](#api)
 
 Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
@@ -115,7 +115,7 @@ my_tests.root_module.addImport("zigcheck", zigcheck_mod);
 | `unicodeChar()` | `Gen(u21)` | Random Unicode code point (excludes surrogates) |
 | `unicodeString(max_cps)` | `Gen([]const u8)` | Valid UTF-8 string up to `max_cps` code points |
 
-Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed:
+Slice shrinking removes chunks (halves, quarters, eighths, ..., single elements), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed:
 
 ```zig
 try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
@@ -140,6 +140,23 @@ const g = zigcheck.auto(Point);
 // Generates random Points and shrinks each field independently
 ```
 
+Types can override auto-derivation by declaring a `zigcheck_gen` constant:
+
+```zig
+const Money = struct {
+    cents: u32,
+    pub const zigcheck_gen = zigcheck.Gen(Money){
+        .genFn = &struct { fn f(rng: std.Random, _: std.mem.Allocator, _: usize) Money {
+            return .{ .cents = rng.intRangeAtMost(u32, 0, 100_00) }; // $0-$100
+        } }.f,
+        .shrinkFn = &struct { fn f(_: Money, _: std.mem.Allocator) @import("zigcheck").ShrinkIter(Money) {
+            return @import("zigcheck").ShrinkIter(Money).empty();
+        } }.f,
+    };
+};
+// zigcheck.auto(Money) uses zigcheck_gen instead of deriving from fields
+```
+
 ### Combinators
 
 | Combinator | Signature | Description |
@@ -158,6 +175,7 @@ const g = zigcheck.auto(Point);
 | `scale(T, gen, pct)` | `Gen(T)` | Scale size parameter by percentage |
 | `mapSize(T, gen, fn)` | `Gen(T)` | Transform size parameter with a function |
 | `suchThatMap(A, B, gen, fn)` | `Gen(B)` | Filter and transform in one step |
+| `funGen(A, B, gen_b)` | `Gen(FunWith(A,B,gen_b))` | Generate random pure functions (QuickCheck `Fun`) |
 
 ```zig
 // Only test with positive even numbers

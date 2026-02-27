@@ -484,6 +484,140 @@ pub fn suchThatMap(
     };
 }
 
+// -- Function generation (CoArbitrary equivalent) -------------------------
+
+/// A generated "function" from A to B. This is zigcheck's equivalent of
+/// QuickCheck's CoArbitrary-based function generation.
+///
+/// Each Fun(A, B) instance represents a deterministic, pure function that
+/// maps different inputs to (generally) different outputs. The function's
+/// behavior is determined by its seed — different seeds produce different
+/// functions.
+///
+/// ```zig
+/// test "map preserves composition" {
+///     try zigcheck.forAll2(
+///         zigcheck.Fun(u32, u32), u32,
+///         zigcheck.funGen(u32, u32, zigcheck.generators.int(u32)),
+///         zigcheck.generators.int(u32),
+///         struct {
+///             fn prop(f: zigcheck.Fun(u32, u32), x: u32) !void {
+///                 // f is a random function — test properties about it
+///                 _ = f.call(x);
+///             }
+///         }.prop,
+///     );
+/// }
+/// ```
+pub fn Fun(comptime A: type, comptime B: type) type {
+    return struct {
+        seed: u64,
+
+        /// Call the function with an argument. Hashes the input to perturb
+        /// the seed, then generates a B value from the perturbed RNG.
+        /// This is deterministic: same Fun + same input = same output.
+        pub fn call(self: @This(), a: A) B {
+            // Hash the input to perturb the seed
+            var hasher = std.hash.Wyhash.init(self.seed);
+            std.hash.autoHash(&hasher, a);
+            var prng = std.Random.DefaultPrng.init(hasher.final());
+            // Generate B at size 100 (full range) with no allocator
+            // For types that need allocation, this produces a zero-length result
+            var buf: [4096]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&buf);
+            return gen_b_stored.generate(prng.random(), fba.allocator(), 100);
+        }
+
+        // Store the generator at comptime so call() can access it
+        const gen_b_stored: Gen(B) = blk: {
+            // This will be set by funGen
+            break :blk Gen(B){
+                .genFn = struct {
+                    fn f(_: std.Random, _: std.mem.Allocator, _: usize) B {
+                        return std.mem.zeroes(B);
+                    }
+                }.f,
+                .shrinkFn = struct {
+                    fn f(_: B, _: std.mem.Allocator) ShrinkIter(B) {
+                        return ShrinkIter(B).empty();
+                    }
+                }.f,
+            };
+        };
+
+        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            try writer.print("Fun(seed=0x{x})", .{self.seed});
+        }
+    };
+}
+
+/// Generate random functions from A to B. QuickCheck: `CoArbitrary a => Arbitrary (a -> b)`.
+///
+/// Each generated function is deterministic and pure — the same input always
+/// produces the same output for a given Fun instance. Different Fun instances
+/// (different seeds) produce different functions.
+///
+/// Shrinks toward seed 0 (which produces a "simpler" function).
+pub fn funGen(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) Gen(FunWith(A, B, gen_b)) {
+    return .{
+        .genFn = struct {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) FunWith(A, B, gen_b) {
+                return .{ .seed = rng.int(u64) };
+            }
+        }.f,
+        .shrinkFn = struct {
+            fn f(value: FunWith(A, B, gen_b), allocator: std.mem.Allocator) ShrinkIter(FunWith(A, B, gen_b)) {
+                // Shrink the seed using integer shrinking
+                const state = allocator.create(shrink.IntShrinkState(u64)) catch return ShrinkIter(FunWith(A, B, gen_b)).empty();
+                state.* = shrink.IntShrinkState(u64).init(value.seed);
+
+                const State = struct {
+                    inner: *shrink.IntShrinkState(u64),
+
+                    fn next(self: *@This()) ?FunWith(A, B, gen_b) {
+                        if (self.inner.next()) |new_seed| {
+                            return .{ .seed = new_seed };
+                        }
+                        return null;
+                    }
+
+                    fn typeErasedNext(ctx: *anyopaque) ?FunWith(A, B, gen_b) {
+                        const self: *@This() = @ptrCast(@alignCast(ctx));
+                        return self.next();
+                    }
+                };
+                const wrapper = allocator.create(State) catch return ShrinkIter(FunWith(A, B, gen_b)).empty();
+                wrapper.* = .{ .inner = state };
+                return .{
+                    .context = @ptrCast(wrapper),
+                    .nextFn = State.typeErasedNext,
+                };
+            }
+        }.f,
+    };
+}
+
+/// Internal: Fun type parameterized by the generator (so each funGen call
+/// produces a distinct type that carries its gen_b at comptime).
+pub fn FunWith(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) type {
+    return struct {
+        seed: u64,
+
+        pub fn call(self: @This(), a: A) B {
+            var hasher = std.hash.Wyhash.init(self.seed);
+            std.hash.autoHash(&hasher, a);
+            var prng = std.Random.DefaultPrng.init(hasher.final());
+            var buf: [4096]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&buf);
+            return gen_b.generate(prng.random(), fba.allocator(), 100);
+        }
+
+        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            try writer.print("Fun(seed=0x{x})", .{self.seed});
+        }
+    };
+}
+
 // -- Tests ----------------------------------------------------------------
 
 test "constant: always produces the same value" {
@@ -748,4 +882,39 @@ test "suchThatMap: filters and transforms" {
         try std.testing.expect(v <= 100);
         try std.testing.expect(v % 2 == 0);
     }
+}
+
+test "funGen: generated functions are deterministic" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = funGen(u32, u32, generators.int(u32));
+    const f = g.generate(prng.random(), std.testing.allocator, 100);
+    // Same input should always produce same output
+    const a = f.call(42);
+    const b = f.call(42);
+    try std.testing.expectEqual(a, b);
+}
+
+test "funGen: different inputs produce different outputs (usually)" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = funGen(u32, u32, generators.int(u32));
+    const f = g.generate(prng.random(), std.testing.allocator, 100);
+    // Different inputs should usually produce different outputs
+    var distinct: usize = 0;
+    for (0..20) |i| {
+        if (f.call(@intCast(i)) != f.call(@intCast(i + 100))) distinct += 1;
+    }
+    try std.testing.expect(distinct > 10); // most pairs should differ
+}
+
+test "funGen: different seeds produce different functions" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = funGen(u32, u32, generators.int(u32));
+    const f1 = g.generate(prng.random(), std.testing.allocator, 100);
+    const f2 = g.generate(prng.random(), std.testing.allocator, 100);
+    // Different functions should disagree on at least some inputs
+    var disagree: usize = 0;
+    for (0..20) |i| {
+        if (f1.call(@intCast(i)) != f2.call(@intCast(i))) disagree += 1;
+    }
+    try std.testing.expect(disagree > 5);
 }

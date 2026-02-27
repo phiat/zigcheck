@@ -260,6 +260,9 @@ pub const resize = combinators_mod.resize;
 pub const scale = combinators_mod.scale;
 pub const mapSize = combinators_mod.mapSize;
 pub const suchThatMap = combinators_mod.suchThatMap;
+pub const Fun = combinators_mod.Fun;
+pub const FunWith = combinators_mod.FunWith;
+pub const funGen = combinators_mod.funGen;
 
 // Collections and strings
 pub const asciiChar = collections_mod.asciiChar;
