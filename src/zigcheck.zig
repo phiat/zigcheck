@@ -48,6 +48,13 @@ pub const PropertyContext = runner.PropertyContext;
 pub const forAllCtx = runner.forAllCtx;
 pub const forAllCtxWith = runner.forAllCtxWith;
 
+// -- Fuzz integration -----------------------------------------------------
+
+pub const fromFuzzInput = @import("fuzz.zig").fromFuzzInput;
+pub const FuzzCheckResult = runner.FuzzCheckResult;
+pub const checkFuzzOne = runner.checkFuzzOne;
+pub const forAllFuzzOne = runner.forAllFuzzOne;
+
 // -- Convenience re-exports -----------------------------------------------
 
 /// Auto-derive a generator for any supported type via comptime reflection.
@@ -126,4 +133,5 @@ test {
     _ = @import("shrink.zig");
     _ = @import("runner.zig");
     _ = @import("stateful.zig");
+    _ = @import("fuzz.zig");
 }

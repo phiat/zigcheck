@@ -249,6 +249,79 @@ pub fn forAllWith(
     }
 }
 
+/// Result of a single fuzz-driven property check (no logging).
+pub fn FuzzCheckResult(comptime T: type) type {
+    return union(enum) {
+        passed: void,
+        failed: struct {
+            original: T,
+            shrunk: T,
+            shrink_steps: usize,
+        },
+    };
+}
+
+/// Check a property once using fuzz bytes. Returns a result without
+/// logging — use `forAllFuzzOne` for the std.testing integration that
+/// logs counterexamples and returns errors.
+pub fn checkFuzzOne(
+    comptime T: type,
+    gen: Gen(T),
+    bytes: []const u8,
+    property: *const fn (T) anyerror!void,
+) FuzzCheckResult(T) {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const value = @import("fuzz.zig").fromFuzzInput(T, gen, bytes, arena.allocator());
+    if (property(value)) |_| {
+        return .{ .passed = {} };
+    } else |err| {
+        if (err == TestDiscarded) return .{ .passed = {} };
+        const shrunk = doShrink(T, gen, property, value, 1000, false);
+        return .{ .failed = .{
+            .original = value,
+            .shrunk = shrunk.value,
+            .shrink_steps = shrunk.steps,
+        } };
+    }
+}
+
+/// Run a single property check using fuzz bytes instead of a PRNG seed.
+///
+/// Intended as the body of `std.testing.fuzz`'s callback: the fuzzer
+/// provides coverage-guided bytes, zigcheck's generators consume them
+/// via FuzzRandom, and on failure doShrink produces a minimal
+/// counterexample using structured shrinking.
+///
+/// ```zig
+/// test "roundtrip fuzz" {
+///     try std.testing.fuzz({}, struct {
+///         fn f(_: anytype, bytes: []const u8) !void {
+///             try zigcheck.forAllFuzzOne(User, zigcheck.auto(User), bytes, struct {
+///                 fn prop(u: User) !void {
+///                     try std.testing.expectEqual(u, decode(encode(u)));
+///                 }
+///             }.prop);
+///         }
+///     }.f, .{});
+/// }
+/// ```
+pub fn forAllFuzzOne(
+    comptime T: type,
+    gen: Gen(T),
+    bytes: []const u8,
+    property: *const fn (T) anyerror!void,
+) anyerror!void {
+    const result = checkFuzzOne(T, gen, bytes, property);
+    switch (result) {
+        .passed => {},
+        .failed => |f| {
+            logFailure(1, "{any}", .{f.shrunk}, "{any}", .{f.original}, f.shrink_steps, 0);
+            return error.PropertyFalsified;
+        },
+    }
+}
+
 /// Replay a previously failed property check using its seed.
 /// QuickCheck: `recheck`. Runs a single test with the same seed to reproduce
 /// the failure, then shrinks again.
