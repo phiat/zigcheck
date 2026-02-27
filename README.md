@@ -8,7 +8,7 @@
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
 
-Property-based testing for Zig. Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
+Property-based testing for Zig, inspired by Haskell's [QuickCheck](https://hackage.haskell.org/package/QuickCheck). Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
 
 ## Quick start
 
