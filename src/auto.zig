@@ -282,11 +282,11 @@ fn unionGen(comptime T: type) Gen(T) {
 
                 // Count: earlier void variants + payload shrinks
                 var count: usize = 0;
-                inline for (fields, 0..) |field, i| {
+                inline for (fields) |field| {
                     if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
                         if (field.type == void) count += 1;
                     }
-                    _ = i;
+
                 }
 
                 // For simplicity, just try earlier void variants

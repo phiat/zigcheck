@@ -56,6 +56,11 @@ pub fn assertEqual(comptime T: type, expected: T, actual: T) !void {
 ///     fn prop(n: u32) !void { ... }
 /// }.prop));
 /// ```
+///
+/// **Note:** This is a post-hoc duration check, not a preemptive timeout.
+/// The property runs to completion, then elapsed time is checked. A property
+/// that infinite-loops will hang forever. Use external mechanisms (e.g. test
+/// runner timeouts) if you need hard cancellation.
 pub fn within(
     comptime T: type,
     comptime timeout_us: u64,
@@ -706,12 +711,52 @@ pub fn forAllCollect(
     gen: Gen(T),
     property: *const fn (T) anyerror!void,
 ) !void {
-    return forAllLabeledWith(config, T, gen, property, struct {
-        fn classify(value: T) []const []const u8 {
-            const label = std.fmt.allocPrint(std.heap.page_allocator, "{any}", .{value}) catch return &.{};
-            return @constCast(&[_][]const u8{label})[0..1];
+    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer label_arena.deinit();
+    const alloc = label_arena.allocator();
+
+    const seed = resolveSeed(config);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    var label_map = std.StringHashMap(usize).init(alloc);
+    var tests_run: usize = 0;
+    var discards: usize = 0;
+
+    while (tests_run < config.num_tests) {
+        if (discards >= config.max_discard) {
+            logGaveUp(tests_run, discards);
+            return error.GaveUp;
         }
-    }.classify);
+        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const value = gen.generate(rng, alloc, size);
+
+        if (property(value)) |_| {
+            const label = std.fmt.allocPrint(alloc, "{any}", .{value}) catch continue;
+            const entry = label_map.getOrPut(label) catch continue;
+            if (!entry.found_existing) {
+                entry.value_ptr.* = 0;
+            }
+            entry.value_ptr.* += 1;
+            tests_run += 1;
+        } else |err| {
+            if (err == TestDiscarded) {
+                discards += 1;
+                continue;
+            }
+            const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
+            logFailure(tests_run + 1, "{any}", .{shrunk.value}, "{any}", .{value}, shrunk.steps, seed);
+            return error.PropertyFalsified;
+        }
+    }
+
+    if (label_map.count() > 0) {
+        std.log.info("zigcheck: {d} tests, coverage:", .{tests_run});
+        var iter = label_map.iterator();
+        while (iter.next()) |entry| {
+            const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(tests_run)) * 100.0;
+            std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
+        }
+    }
 }
 
 /// Run a property check that groups labels under a named table.
@@ -737,16 +782,55 @@ pub fn forAllTabulate(
     comptime table_name: []const u8,
     comptime classifier: *const fn (T) []const []const u8,
 ) !void {
-    return forAllLabeledWith(config, T, gen, property, struct {
-        fn tabulateClassifier(value: T) []const []const u8 {
-            const labels = classifier(value);
-            const prefixed = std.heap.page_allocator.alloc([]const u8, labels.len) catch return &.{};
-            for (labels, 0..) |label, i| {
-                prefixed[i] = std.fmt.allocPrint(std.heap.page_allocator, table_name ++ "/{s}", .{label}) catch label;
-            }
-            return prefixed;
+    var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer label_arena.deinit();
+    const alloc = label_arena.allocator();
+
+    const seed = resolveSeed(config);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    var label_map = std.StringHashMap(usize).init(alloc);
+    var tests_run: usize = 0;
+    var discards: usize = 0;
+
+    while (tests_run < config.num_tests) {
+        if (discards >= config.max_discard) {
+            logGaveUp(tests_run, discards);
+            return error.GaveUp;
         }
-    }.tabulateClassifier);
+        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const value = gen.generate(rng, alloc, size);
+
+        if (property(value)) |_| {
+            const labels = classifier(value);
+            for (labels) |label| {
+                const prefixed = std.fmt.allocPrint(alloc, table_name ++ "/{s}", .{label}) catch continue;
+                const entry = label_map.getOrPut(prefixed) catch continue;
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = 0;
+                }
+                entry.value_ptr.* += 1;
+            }
+            tests_run += 1;
+        } else |err| {
+            if (err == TestDiscarded) {
+                discards += 1;
+                continue;
+            }
+            const shrunk = doShrink(T, gen, property, value, config.max_shrinks, config.verbose_shrink);
+            logFailure(tests_run + 1, "{any}", .{shrunk.value}, "{any}", .{value}, shrunk.steps, seed);
+            return error.PropertyFalsified;
+        }
+    }
+
+    if (label_map.count() > 0) {
+        std.log.info("zigcheck: {d} tests, coverage:", .{tests_run});
+        var iter = label_map.iterator();
+        while (iter.next()) |entry| {
+            const pct = @as(f64, @floatFromInt(entry.value_ptr.*)) / @as(f64, @floatFromInt(tests_run)) * 100.0;
+            std.log.info("  {d:.1}% {s}", .{ pct, entry.key_ptr.* });
+        }
+    }
 }
 
 // -- Composable labeling via PropertyContext ------------------------------
@@ -1032,386 +1116,8 @@ pub fn forAllZipWith(config: Config, comptime gens: anytype, comptime property: 
     }
 }
 
-// -- Multi-argument properties --------------------------------------------
-
-pub fn CheckResult2(comptime A: type, comptime B: type) type {
-    return union(enum) {
-        passed: struct { num_tests: usize },
-        failed: struct {
-            seed: u64,
-            original_a: A,
-            original_b: B,
-            shrunk_a: A,
-            shrunk_b: B,
-            shrink_steps: usize,
-            num_tests_before_fail: usize,
-        },
-        gave_up: struct {
-            num_tests: usize,
-            num_discarded: usize,
-        },
-    };
-}
-
-/// Run a two-argument property check with default config.
-pub fn forAll2(
-    comptime A: type,
-    comptime B: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    property: *const fn (A, B) anyerror!void,
-) !void {
-    return forAll2With(.{}, A, B, gen_a, gen_b, property);
-}
-
-/// Run a two-argument property check with explicit config.
-pub fn forAll2With(
-    config: Config,
-    comptime A: type,
-    comptime B: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    property: *const fn (A, B) anyerror!void,
-) !void {
-    const result = check2(config, A, B, gen_a, gen_b, property);
-    switch (result) {
-        .passed => {},
-        .failed => |f| {
-            logFailure(f.num_tests_before_fail, "({any}, {any})", .{ f.shrunk_a, f.shrunk_b }, "({any}, {any})", .{ f.original_a, f.original_b }, f.shrink_steps, f.seed);
-            return error.PropertyFalsified;
-        },
-        .gave_up => |g| {
-            logGaveUp(g.num_tests, g.num_discarded);
-            return error.GaveUp;
-        },
-    }
-}
-
-/// Run a two-argument property check and return the result.
-pub fn check2(
-    config: Config,
-    comptime A: type,
-    comptime B: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    property: *const fn (A, B) anyerror!void,
-) CheckResult2(A, B) {
-    const seed = resolveSeed(config);
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rng = prng.random();
-
-    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer gen_arena.deinit();
-    const gen_alloc = gen_arena.allocator();
-
-    var tests_run: usize = 0;
-    var discards: usize = 0;
-
-    while (tests_run < config.num_tests) {
-        if (discards >= config.max_discard) {
-            return .{ .gave_up = .{
-                .num_tests = tests_run,
-                .num_discarded = discards,
-            } };
-        }
-
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
-        const a = gen_a.generate(rng, gen_alloc, size);
-        const b = gen_b.generate(rng, gen_alloc, size);
-
-        if (config.verbose) {
-            std.log.info("zigcheck: test {d}/{d}: ({any}, {any})", .{ tests_run + 1, config.num_tests, a, b });
-        }
-
-        if (property(a, b)) |_| {
-            tests_run += 1;
-        } else |err| {
-            if (err == TestDiscarded) {
-                discards += 1;
-                continue;
-            }
-            const shrunk = doShrink2(A, B, gen_a, gen_b, property, a, b, config.max_shrinks);
-            return .{ .failed = .{
-                .seed = seed,
-                .original_a = a,
-                .original_b = b,
-                .shrunk_a = shrunk.a,
-                .shrunk_b = shrunk.b,
-                .shrink_steps = shrunk.steps,
-                .num_tests_before_fail = tests_run + 1,
-            } };
-        }
-    }
-
-    return .{ .passed = .{ .num_tests = tests_run } };
-}
-
-fn doShrink2(
-    comptime A: type,
-    comptime B: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    property: *const fn (A, B) anyerror!void,
-    orig_a: A,
-    orig_b: B,
-    max_shrinks: usize,
-) struct { a: A, b: B, steps: usize } {
-    var best_a = orig_a;
-    var best_b = orig_b;
-    var steps: usize = 0;
-
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-
-    // Repeat coordinate descent rounds until a full round makes no progress
-    // across all dimensions, avoiding local minima from serial single-pass.
-    while (steps < max_shrinks) {
-        var round_improved = false;
-
-        // Shrink A as far as possible while holding B constant
-        while (steps < max_shrinks) {
-            var iter_a = gen_a.shrink(best_a, arena_state.allocator());
-            var improved_a = false;
-            while (iter_a.next()) |candidate| {
-                if (property(candidate, best_b)) |_| {} else |err| {
-                    if (err == TestDiscarded) continue;
-                    best_a = candidate;
-                    steps += 1;
-                    improved_a = true;
-                    round_improved = true;
-                    break;
-                }
-            }
-            if (!improved_a) break;
-        }
-
-        // Shrink B as far as possible while holding A constant
-        while (steps < max_shrinks) {
-            var iter_b = gen_b.shrink(best_b, arena_state.allocator());
-            var improved_b = false;
-            while (iter_b.next()) |candidate| {
-                if (property(best_a, candidate)) |_| {} else |err| {
-                    if (err == TestDiscarded) continue;
-                    best_b = candidate;
-                    steps += 1;
-                    improved_b = true;
-                    round_improved = true;
-                    break;
-                }
-            }
-            if (!improved_b) break;
-        }
-
-        if (!round_improved) break;
-    }
-
-    return .{ .a = best_a, .b = best_b, .steps = steps };
-}
-
-pub fn CheckResult3(comptime A: type, comptime B: type, comptime C: type) type {
-    return union(enum) {
-        passed: struct { num_tests: usize },
-        failed: struct {
-            seed: u64,
-            original_a: A,
-            original_b: B,
-            original_c: C,
-            shrunk_a: A,
-            shrunk_b: B,
-            shrunk_c: C,
-            shrink_steps: usize,
-            num_tests_before_fail: usize,
-        },
-        gave_up: struct {
-            num_tests: usize,
-            num_discarded: usize,
-        },
-    };
-}
-
-/// Run a three-argument property check with default config.
-pub fn forAll3(
-    comptime A: type,
-    comptime B: type,
-    comptime C: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    gen_c: Gen(C),
-    property: *const fn (A, B, C) anyerror!void,
-) !void {
-    return forAll3With(.{}, A, B, C, gen_a, gen_b, gen_c, property);
-}
-
-/// Run a three-argument property check with explicit config.
-pub fn forAll3With(
-    config: Config,
-    comptime A: type,
-    comptime B: type,
-    comptime C: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    gen_c: Gen(C),
-    property: *const fn (A, B, C) anyerror!void,
-) !void {
-    const result = check3(config, A, B, C, gen_a, gen_b, gen_c, property);
-    switch (result) {
-        .passed => {},
-        .failed => |f| {
-            logFailure(f.num_tests_before_fail, "({any}, {any}, {any})", .{ f.shrunk_a, f.shrunk_b, f.shrunk_c }, "({any}, {any}, {any})", .{ f.original_a, f.original_b, f.original_c }, f.shrink_steps, f.seed);
-            return error.PropertyFalsified;
-        },
-        .gave_up => |g| {
-            logGaveUp(g.num_tests, g.num_discarded);
-            return error.GaveUp;
-        },
-    }
-}
-
-/// Run a three-argument property check and return the result.
-pub fn check3(
-    config: Config,
-    comptime A: type,
-    comptime B: type,
-    comptime C: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    gen_c: Gen(C),
-    property: *const fn (A, B, C) anyerror!void,
-) CheckResult3(A, B, C) {
-    const seed = resolveSeed(config);
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rng = prng.random();
-
-    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer gen_arena.deinit();
-    const gen_alloc = gen_arena.allocator();
-
-    var tests_run: usize = 0;
-    var discards: usize = 0;
-
-    while (tests_run < config.num_tests) {
-        if (discards >= config.max_discard) {
-            return .{ .gave_up = .{
-                .num_tests = tests_run,
-                .num_discarded = discards,
-            } };
-        }
-
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
-        const a = gen_a.generate(rng, gen_alloc, size);
-        const b = gen_b.generate(rng, gen_alloc, size);
-        const c = gen_c.generate(rng, gen_alloc, size);
-
-        if (config.verbose) {
-            std.log.info("zigcheck: test {d}/{d}: ({any}, {any}, {any})", .{ tests_run + 1, config.num_tests, a, b, c });
-        }
-
-        if (property(a, b, c)) |_| {
-            tests_run += 1;
-        } else |err| {
-            if (err == TestDiscarded) {
-                discards += 1;
-                continue;
-            }
-            const shrunk = doShrink3(A, B, C, gen_a, gen_b, gen_c, property, a, b, c, config.max_shrinks);
-            return .{ .failed = .{
-                .seed = seed,
-                .original_a = a,
-                .original_b = b,
-                .original_c = c,
-                .shrunk_a = shrunk.a,
-                .shrunk_b = shrunk.b,
-                .shrunk_c = shrunk.c,
-                .shrink_steps = shrunk.steps,
-                .num_tests_before_fail = tests_run + 1,
-            } };
-        }
-    }
-
-    return .{ .passed = .{ .num_tests = tests_run } };
-}
-
-fn doShrink3(
-    comptime A: type,
-    comptime B: type,
-    comptime C: type,
-    gen_a: Gen(A),
-    gen_b: Gen(B),
-    gen_c: Gen(C),
-    property: *const fn (A, B, C) anyerror!void,
-    orig_a: A,
-    orig_b: B,
-    orig_c: C,
-    max_shrinks: usize,
-) struct { a: A, b: B, c: C, steps: usize } {
-    var best_a = orig_a;
-    var best_b = orig_b;
-    var best_c = orig_c;
-    var steps: usize = 0;
-
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-
-    // Repeat coordinate descent rounds until a full round makes no progress.
-    while (steps < max_shrinks) {
-        var round_improved = false;
-
-        // Shrink A as far as possible
-        while (steps < max_shrinks) {
-            var iter_a = gen_a.shrink(best_a, arena_state.allocator());
-            var improved_a = false;
-            while (iter_a.next()) |candidate| {
-                if (property(candidate, best_b, best_c)) |_| {} else |err| {
-                    if (err == TestDiscarded) continue;
-                    best_a = candidate;
-                    steps += 1;
-                    improved_a = true;
-                    round_improved = true;
-                    break;
-                }
-            }
-            if (!improved_a) break;
-        }
-
-        // Shrink B as far as possible
-        while (steps < max_shrinks) {
-            var iter_b = gen_b.shrink(best_b, arena_state.allocator());
-            var improved_b = false;
-            while (iter_b.next()) |candidate| {
-                if (property(best_a, candidate, best_c)) |_| {} else |err| {
-                    if (err == TestDiscarded) continue;
-                    best_b = candidate;
-                    steps += 1;
-                    improved_b = true;
-                    round_improved = true;
-                    break;
-                }
-            }
-            if (!improved_b) break;
-        }
-
-        // Shrink C as far as possible
-        while (steps < max_shrinks) {
-            var iter_c = gen_c.shrink(best_c, arena_state.allocator());
-            var improved_c = false;
-            while (iter_c.next()) |candidate| {
-                if (property(best_a, best_b, candidate)) |_| {} else |err| {
-                    if (err == TestDiscarded) continue;
-                    best_c = candidate;
-                    steps += 1;
-                    improved_c = true;
-                    round_improved = true;
-                    break;
-                }
-            }
-            if (!improved_c) break;
-        }
-
-        if (!round_improved) break;
-    }
-
-    return .{ .a = best_a, .b = best_b, .c = best_c, .steps = steps };
-}
+// Multi-argument properties: use forAllZip / forAllZipWith instead.
+// These generalize forAll2/forAll3 to any number of generators via zip.
 
 // -- Tests ----------------------------------------------------------------
 
@@ -1599,50 +1305,23 @@ test "check: shrinking skips discarded candidates" {
     }
 }
 
-// -- forAll2 / check2 tests -----------------------------------------------
+// -- forAllZip multi-argument tests (replaced check2/check3) ----------------
 
-test "forAll2: passing two-argument property" {
-    try forAll2(i32, i32, generators.int(i32), generators.int(i32), struct {
+test "forAllZip: passing two-argument property" {
+    try forAllZip(.{
+        generators.int(i32),
+        generators.int(i32),
+    }, struct {
         fn prop(_: i32, _: i32) !void {}
     }.prop);
 }
 
-test "check2: failing property returns failed" {
-    const result = check2(.{ .seed = 42, .num_tests = 100 }, u32, u32, generators.int(u32), generators.int(u32), struct {
-        fn prop(a: u32, b: u32) !void {
-            if (a +% b > 10) return error.PropertyFalsified;
-        }
-    }.prop);
-    switch (result) {
-        .passed => return error.TestUnexpectedResult,
-        .failed => |f| {
-            try std.testing.expectEqual(@as(u64, 42), f.seed);
-            try std.testing.expect(f.num_tests_before_fail <= 100);
-        },
-        .gave_up => return error.TestUnexpectedResult,
-    }
-}
-
-test "check2: shrinks both arguments" {
-    const result = check2(.{ .seed = 42, .num_tests = 100 }, u32, u32, generators.int(u32), generators.int(u32), struct {
-        fn prop(a: u32, b: u32) !void {
-            if (a >= 5 and b >= 5) return error.PropertyFalsified;
-        }
-    }.prop);
-    switch (result) {
-        .passed => return error.TestUnexpectedResult,
-        .failed => |f| {
-            try std.testing.expectEqual(@as(u32, 5), f.shrunk_a);
-            try std.testing.expectEqual(@as(u32, 5), f.shrunk_b);
-        },
-        .gave_up => return error.TestUnexpectedResult,
-    }
-}
-
-// -- forAll3 / check3 tests -----------------------------------------------
-
-test "forAll3: passing three-argument property" {
-    try forAll3(i32, i32, bool, generators.int(i32), generators.int(i32), generators.boolean(), struct {
+test "forAllZip: passing three-argument property" {
+    try forAllZip(.{
+        generators.int(i32),
+        generators.int(i32),
+        generators.boolean(),
+    }, struct {
         fn prop(_: i32, _: i32, _: bool) !void {}
     }.prop);
 }
@@ -1734,25 +1413,6 @@ test "checkLabeled: returns failed on property failure" {
         .passed => return error.TestUnexpectedResult,
         .failed => |f| {
             try std.testing.expect(f.shrink_steps > 0);
-        },
-        .gave_up => return error.TestUnexpectedResult,
-    }
-}
-
-// -- forAll3 / check3 tests -----------------------------------------------
-
-test "check3: shrinks all three arguments" {
-    const result = check3(.{ .seed = 42, .num_tests = 100 }, u32, u32, u32, generators.int(u32), generators.int(u32), generators.int(u32), struct {
-        fn prop(a: u32, b: u32, c: u32) !void {
-            if (a >= 3 and b >= 3 and c >= 3) return error.PropertyFalsified;
-        }
-    }.prop);
-    switch (result) {
-        .passed => return error.TestUnexpectedResult,
-        .failed => |f| {
-            try std.testing.expectEqual(@as(u32, 3), f.shrunk_a);
-            try std.testing.expectEqual(@as(u32, 3), f.shrunk_b);
-            try std.testing.expectEqual(@as(u32, 3), f.shrunk_c);
         },
         .gave_up => return error.TestUnexpectedResult,
     }

@@ -12,4 +12,3 @@ zig-cache/
 # Development files (not part of the library)
 AGENTS.md
 zig-quickcheck-plan.md
-zcheck_examples.zig

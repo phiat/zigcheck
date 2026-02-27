@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-159%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-156%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -229,22 +229,22 @@ The runner uses an arena allocator for shrink state, freed in bulk when shrinkin
 
 ## Multi-argument properties
 
-Test properties involving two or three values with independent shrinking:
+Test properties involving multiple values with independent per-argument shrinking via `forAllZip`:
 
 ```zig
 test "addition is commutative" {
-    try zigcheck.forAll2(i32, i32,
-        zigcheck.generators.int(i32), zigcheck.generators.int(i32),
-        struct {
-            fn prop(a: i32, b: i32) !void {
-                if (a +% b != b +% a) return error.PropertyFalsified;
-            }
-        }.prop,
-    );
+    try zigcheck.forAllZip(.{
+        zigcheck.generators.int(i32),
+        zigcheck.generators.int(i32),
+    }, struct {
+        fn prop(a: i32, b: i32) !void {
+            if (a +% b != b +% a) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 ```
 
-Also available: `forAll2With`, `forAll3`, `forAll3With`, `check2`, `check3`.
+Works with any number of generators. Use `forAllZipWith` for explicit config.
 
 ## Implication / preconditions
 
@@ -252,16 +252,16 @@ Use `assume()` to discard test cases that don't meet preconditions. The runner t
 
 ```zig
 test "division is inverse of multiplication" {
-    try zigcheck.forAll2(i32, i32,
-        zigcheck.generators.int(i32), zigcheck.generators.intRange(i32, 1, 1000),
-        struct {
-            fn prop(a: i32, b: i32) !void {
-                try zigcheck.assume(b != 0); // skip division by zero
-                const result = @divTrunc(a *% b, b);
-                if (result != a) return error.PropertyFalsified;
-            }
-        }.prop,
-    );
+    try zigcheck.forAllZip(.{
+        zigcheck.generators.int(i32),
+        zigcheck.generators.intRange(i32, 1, 1000),
+    }, struct {
+        fn prop(a: i32, b: i32) !void {
+            try zigcheck.assume(b != 0); // skip division by zero
+            const result = @divTrunc(a *% b, b);
+            if (result != a) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 ```
 
@@ -330,13 +330,9 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 |---|---|
 | `forAll(T, gen, property)` | Run property check with default config |
 | `forAllWith(config, T, gen, property)` | Run with explicit config |
-| `forAll2(A, B, gen_a, gen_b, property)` | Two-argument property check |
-| `forAll3(A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument property check |
-| `check(config, T, gen, property)` | Return `CheckResult` without failing |
-| `check2(config, A, B, gen_a, gen_b, property)` | Two-argument check returning result |
-| `check3(config, A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument check returning result |
-| `forAllZip(gens, property)` | N-argument property with splatted args (generalizes forAll2/forAll3) |
+| `forAllZip(gens, property)` | N-argument property with splatted args |
 | `forAllZipWith(config, gens, property)` | N-argument property with explicit config |
+| `check(config, T, gen, property)` | Return `CheckResult` without failing |
 | `recheck(T, gen, property, result)` | Replay a failed `CheckResult` (QuickCheck `recheck`) |
 
 ### Property helpers
