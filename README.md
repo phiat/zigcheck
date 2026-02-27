@@ -12,46 +12,52 @@ Property-based testing for Zig. Generate random structured inputs, check propert
 
 ## Quick start
 
+The #1 property-based testing pattern: **if you encode it, you should be able to decode it back**.
+
 ```zig
 const std = @import("std");
 const zigcheck = @import("zigcheck");
 
-// Find bugs with auto-derived generators — no manual setup needed
-const Rect = struct { w: u16, h: u16 };
-
-test "area fits in u32" {
-    try zigcheck.forAll(Rect, zigcheck.generators.auto(Rect), struct {
-        fn prop(r: Rect) !void {
-            const area = @as(u32, r.w) * @as(u32, r.h);
-            if (area > std.math.maxInt(u16)) return error.PropertyFalsified;
+test "integers survive format/parse roundtrip" {
+    try zigcheck.forAll(i32, zigcheck.generators.int(i32), struct {
+        fn prop(n: i32) !void {
+            var buf: [20]u8 = undefined;
+            const str = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
+            const parsed = std.fmt.parseInt(i32, str, 10) catch
+                return error.PropertyFalsified;
+            if (parsed != n) return error.PropertyFalsified;
         }
     }.prop);
 }
 ```
 
-zigcheck finds a counterexample and **automatically shrinks** it to the smallest failing case:
+This pattern — encode, decode, compare — transfers directly to JSON, protobuf, custom wire formats, anything with a serialization layer.
+
+When a property fails, zigcheck **automatically shrinks** the counterexample to the smallest failing input:
 
 ```
---- zigcheck: FAILED after 1 tests -------------------------
-  Counterexample: Rect{ .w = 256, .h = 256 }
-  Shrunk (24 steps) from: Rect{ .w = 42317, .h = 59820 }
+--- zigcheck: FAILED after 12 tests ------------------------
+  Counterexample: 10
+  Shrunk (8 steps) from: 1847382901
   Reproduction seed: 0x2a
   Rerun with: .seed = 0x2a
 -------------------------------------------------------------
 ```
 
-Multi-argument properties with independent shrinking:
+Specialized generators catch bugs in domain-specific code — here, verifying that every Unicode code point roundtrips through UTF-8:
 
 ```zig
-test "addition is commutative" {
-    try zigcheck.forAll2(i32, i32,
-        zigcheck.generators.int(i32), zigcheck.generators.int(i32),
-        struct {
-            fn prop(a: i32, b: i32) !void {
-                if (a +% b != b +% a) return error.PropertyFalsified;
-            }
-        }.prop,
-    );
+test "utf-8 encoding roundtrips all code points" {
+    try zigcheck.forAll(u21, zigcheck.generators.unicodeChar(), struct {
+        fn prop(codepoint: u21) !void {
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(codepoint, &buf) catch
+                return error.PropertyFalsified;
+            const decoded = std.unicode.utf8Decode(buf[0..len]) catch
+                return error.PropertyFalsified;
+            if (decoded != codepoint) return error.PropertyFalsified;
+        }
+    }.prop);
 }
 ```
 
