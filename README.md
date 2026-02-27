@@ -68,7 +68,7 @@ Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/main.tar.gz",
+        .url = "https://github.com/phiat/zigcheck/archive/v0.2.0.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
 },
