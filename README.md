@@ -1,9 +1,9 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-156%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-164%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.2-orange)](build.zig.zon)
+[![Version](https://img.shields.io/badge/version-0.3.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
@@ -68,7 +68,7 @@ Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/v0.2.2.tar.gz",
+        .url = "https://github.com/phiat/zigcheck/archive/v0.3.0.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
 },
@@ -334,6 +334,9 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 | `forAllZipWith(config, gens, property)` | N-argument property with explicit config |
 | `check(config, T, gen, property)` | Return `CheckResult` without failing |
 | `recheck(T, gen, property, result)` | Replay a failed `CheckResult` (QuickCheck `recheck`) |
+| `fromFuzzInput(T, gen, bytes, allocator)` | Generate one structured value from fuzz bytes |
+| `checkFuzzOne(T, gen, bytes, property)` | Fuzz one-shot check, returns `FuzzCheckResult` (no logging) |
+| `forAllFuzzOne(T, gen, bytes, property)` | Fuzz one-shot check with logging (use inside `std.testing.fuzz`) |
 
 ### Property helpers
 
@@ -426,6 +429,27 @@ test "decoder doesn't crash" {
 
 zigcheck catches "your encoder drops the `email` field." Fuzz testing catches "your decoder panics on a truncated header." **Use both.**
 
+### Hybrid mode: coverage-guided property testing
+
+zigcheck can use `std.testing.fuzz` as a byte source while keeping structured generation and shrinking. The fuzzer's coverage feedback guides *which* inputs are generated; zigcheck's shrinker handles *minimization*:
+
+```zig
+test "roundtrip is coverage-guided" {
+    try std.testing.fuzz({}, struct {
+        fn f(_: anytype, bytes: []const u8) !void {
+            try zigcheck.forAllFuzzOne(User, zigcheck.auto(User), bytes, struct {
+                fn prop(u: User) !void {
+                    const encoded = try encode(u);
+                    try std.testing.expectEqual(u.id, (try decode(encoded)).id);
+                }
+            }.prop);
+        }
+    }.f, .{});
+}
+```
+
+`forAllFuzzOne` generates a typed value from the fuzz bytes via `FuzzRandom` (zeros when bytes are exhausted), tests the property, and on failure runs `doShrink` to produce a minimal counterexample. Use `checkFuzzOne` for the non-logging variant that returns a `FuzzCheckResult`.
+
 ## Project structure
 
 ```
@@ -438,6 +462,7 @@ src/
   auto.zig           # Auto-derivation (enum, struct, optional, union)
   shrink.zig         # ShrinkIter(T) and shrink state types
   runner.zig         # forAll/check engine with shrink loop
+  fuzz.zig           # Fuzz integration (FuzzRandom adapter, fromFuzzInput)
   stateful.zig       # State machine testing (commands, model, postconditions)
 ```
 
