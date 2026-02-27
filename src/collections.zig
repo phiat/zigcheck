@@ -542,7 +542,7 @@ pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
 /// Logs the seed used so results can be reproduced with `sampleWith`.
 pub fn sample(comptime T: type, gen: Gen(T), n: usize, allocator: std.mem.Allocator) ![]T {
     const seed = @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
-    std.log.info("zcheck.sample: using seed 0x{x} (reproduce with sampleWith(..., 0x{x}, ...))", .{ seed, seed });
+    std.log.info("zigcheck.sample: using seed 0x{x} (reproduce with sampleWith(..., 0x{x}, ...))", .{ seed, seed });
     return sampleWith(T, gen, n, seed, allocator);
 }
 

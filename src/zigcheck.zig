@@ -1,4 +1,4 @@
-// zcheck -- Property-based testing for Zig
+// zigcheck -- Property-based testing for Zig
 //
 // Generate random structured inputs, check properties, and automatically
 // shrink failing cases to minimal counterexamples.

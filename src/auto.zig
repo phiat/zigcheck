@@ -22,13 +22,13 @@ pub fn auto(comptime T: type) Gen(T) {
             if (info.size == .slice and info.is_const) {
                 break :blk sliceAutoGen(info.child);
             }
-            @compileError("zcheck.auto: unsupported pointer type " ++ @typeName(T) ++ "; only []const T slices are supported");
+            @compileError("zigcheck.auto: unsupported pointer type " ++ @typeName(T) ++ "; only []const T slices are supported");
         },
         .@"union" => |info| if (info.tag_type != null)
             unionGen(T)
         else
-            @compileError("zcheck.auto: untagged union " ++ @typeName(T) ++ " is not supported; use union(enum) instead"),
-        else => @compileError("zcheck.auto: unsupported type " ++ @typeName(T)),
+            @compileError("zigcheck.auto: untagged union " ++ @typeName(T) ++ " is not supported; use union(enum) instead"),
+        else => @compileError("zigcheck.auto: unsupported type " ++ @typeName(T)),
     };
 }
 

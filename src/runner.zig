@@ -15,7 +15,7 @@ pub const TestDiscarded = error.TestDiscarded;
 ///
 /// ```zig
 /// fn prop(n: i32) !void {
-///     try zcheck.assume(n != 0);
+///     try zigcheck.assume(n != 0);
 ///     // ... test with non-zero n
 /// }
 /// ```
@@ -30,13 +30,13 @@ pub fn assume(condition: bool) !void {
 /// fn prop(n: i32) !void {
 ///     const result = compute(n);
 ///     if (result < 0) {
-///         zcheck.counterexample("compute({d}) = {d}", .{ n, result });
+///         zigcheck.counterexample("compute({d}) = {d}", .{ n, result });
 ///         return error.PropertyFalsified;
 ///     }
 /// }
 /// ```
 pub fn counterexample(comptime fmt: []const u8, args: anytype) void {
-    std.log.info("zcheck context: " ++ fmt, args);
+    std.log.info("zigcheck context: " ++ fmt, args);
 }
 
 /// Assert that two values are equal. On failure, logs both values for diagnostics.
@@ -106,7 +106,7 @@ pub const Config = struct {
 ///
 /// ```zig
 /// // This test passes because the property is expected to fail:
-/// try zcheck.expectFailure(u32, zcheck.generators.int(u32), struct {
+/// try zigcheck.expectFailure(u32, zigcheck.generators.int(u32), struct {
 ///     fn prop(n: u32) !void {
 ///         if (n > 100) return error.PropertyFalsified;
 ///     }
@@ -132,7 +132,7 @@ pub fn expectFailureWith(
         .passed => {
             std.log.err(
                 \\
-                \\--- zcheck: expectFailure UNEXPECTED PASS -----------------
+                \\--- zigcheck: expectFailure UNEXPECTED PASS -----------------
                 \\
                 \\  Property passed {d} tests but was expected to fail.
                 \\
@@ -144,7 +144,7 @@ pub fn expectFailureWith(
         .gave_up => {
             std.log.err(
                 \\
-                \\--- zcheck: expectFailure GAVE UP -------------------------
+                \\--- zigcheck: expectFailure GAVE UP -------------------------
                 \\
                 \\  Property gave up after too many discards.
                 \\
@@ -208,9 +208,9 @@ pub fn forAllWith(
 /// the failure, then shrinks again.
 ///
 /// ```zig
-/// const result = zcheck.check(.{}, u32, gen, property);
+/// const result = zigcheck.check(.{}, u32, gen, property);
 /// // ... later, replay the failure:
-/// try zcheck.recheck(u32, gen, property, result);
+/// try zigcheck.recheck(u32, gen, property, result);
 /// ```
 pub fn recheck(
     comptime T: type,
@@ -235,7 +235,7 @@ fn resolveSeed(config: Config) u64 {
 fn logFailure(num_tests: usize, comptime ce_fmt: []const u8, ce_args: anytype, comptime orig_fmt: []const u8, orig_args: anytype, shrink_steps: usize, seed: u64) void {
     std.log.err(
         \\
-        \\--- zcheck: FAILED after {d} tests ------------------------
+        \\--- zigcheck: FAILED after {d} tests ------------------------
         \\
         ++ "\\  Counterexample: " ++ ce_fmt ++
         \\
@@ -251,7 +251,7 @@ fn logFailure(num_tests: usize, comptime ce_fmt: []const u8, ce_args: anytype, c
 fn logGaveUp(num_tests: usize, num_discarded: usize) void {
     std.log.err(
         \\
-        \\--- zcheck: GAVE UP after {d} tests -----------------------
+        \\--- zigcheck: GAVE UP after {d} tests -----------------------
         \\
         \\  Only {d} tests passed before {d} were discarded.
         \\  Consider using a more targeted generator instead of assume().
@@ -298,7 +298,7 @@ pub fn check(
         const value = gen.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}: {any}", .{ tests_run + 1, config.num_tests, value });
+            std.log.info("zigcheck: test {d}/{d}: {any}", .{ tests_run + 1, config.num_tests, value });
         }
 
         // Test the property
@@ -364,7 +364,7 @@ fn doShrink(
             if (property(candidate)) |_| {
                 // Property passed -- this candidate is too simple
                 if (verbose_shrink) {
-                    std.log.info("zcheck shrink: candidate {any} passed (too simple)", .{candidate});
+                    std.log.info("zigcheck shrink: candidate {any} passed (too simple)", .{candidate});
                 }
             } else |err| {
                 // Discarded test cases don't count as failures
@@ -374,7 +374,7 @@ fn doShrink(
                 steps += 1;
                 improved = true;
                 if (verbose_shrink) {
-                    std.log.info("zcheck shrink: step {d} -> {any}", .{ steps, candidate });
+                    std.log.info("zigcheck shrink: step {d} -> {any}", .{ steps, candidate });
                 }
                 break; // restart shrinking from the new best
             }
@@ -538,7 +538,7 @@ pub fn forAllLabeledWith(
         .passed => |p| {
             // Print coverage report
             if (p.label_names.len > 0) {
-                std.log.info("zcheck: {d} tests, coverage:", .{p.num_tests});
+                std.log.info("zigcheck: {d} tests, coverage:", .{p.num_tests});
                 for (p.label_names, p.label_counts) |name, count| {
                     const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
                     std.log.info("  {d:.1}% {s}", .{ pct, name });
@@ -568,7 +568,7 @@ pub const CoverageRequirement = struct {
 /// label meets its minimum percentage threshold.
 ///
 /// ```zig
-/// try zcheck.forAllCover(.{}, i32, gen, property, classifier, &.{
+/// try zigcheck.forAllCover(.{}, i32, gen, property, classifier, &.{
 ///     .{ .label = "positive", .min_pct = 40.0 },
 ///     .{ .label = "negative", .min_pct = 40.0 },
 /// });
@@ -596,7 +596,7 @@ pub fn forAllCover(
                         if (pct < req.min_pct) {
                             std.log.warn(
                                 \\
-                                \\--- zcheck: INSUFFICIENT COVERAGE -----------------------
+                                \\--- zigcheck: INSUFFICIENT COVERAGE -----------------------
                                 \\
                                 \\  Label "{s}": {d:.1}% (required: {d:.1}%)
                                 \\  {d} of {d} tests
@@ -612,7 +612,7 @@ pub fn forAllCover(
                 if (!found) {
                     std.log.warn(
                         \\
-                        \\--- zcheck: INSUFFICIENT COVERAGE -----------------------
+                        \\--- zigcheck: INSUFFICIENT COVERAGE -----------------------
                         \\
                         \\  Label "{s}": 0.0% (required: {d:.1}%)
                         \\  No test cases matched this label.
@@ -624,7 +624,7 @@ pub fn forAllCover(
             }
             // Print coverage report
             if (p.label_names.len > 0) {
-                std.log.info("zcheck: {d} tests, coverage:", .{p.num_tests});
+                std.log.info("zigcheck: {d} tests, coverage:", .{p.num_tests});
                 for (p.label_names, p.label_counts) |name, count| {
                     const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
                     std.log.info("  {d:.1}% {s}", .{ pct, name });
@@ -648,7 +648,7 @@ pub fn forAllCover(
 /// representation of the generated value. Equivalent to QuickCheck's `collect`.
 ///
 /// ```zig
-/// try zcheck.forAllCollect(.{}, u8, zcheck.generators.intRange(u8, 0, 5), struct {
+/// try zigcheck.forAllCollect(.{}, u8, zigcheck.generators.intRange(u8, 0, 5), struct {
 ///     fn prop(_: u8) !void {}
 /// }.prop);
 /// // Prints distribution: "16.0% 3", "18.0% 0", etc.
@@ -673,7 +673,7 @@ pub fn forAllCollect(
 /// Equivalent to QuickCheck's `tabulate`.
 ///
 /// ```zig
-/// try zcheck.forAllTabulate(.{}, i32, gen, property, "sign", struct {
+/// try zigcheck.forAllTabulate(.{}, i32, gen, property, "sign", struct {
 ///     fn classify(n: i32) []const []const u8 {
 ///         if (n > 0) return &.{"positive"};
 ///         if (n < 0) return &.{"negative"};
@@ -849,7 +849,7 @@ pub fn check2(
         const b = gen_b.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}: ({any}, {any})", .{ tests_run + 1, config.num_tests, a, b });
+            std.log.info("zigcheck: test {d}/{d}: ({any}, {any})", .{ tests_run + 1, config.num_tests, a, b });
         }
 
         if (property(a, b)) |_| {
@@ -1032,7 +1032,7 @@ pub fn check3(
         const c = gen_c.generate(rng, gen_alloc, size);
 
         if (config.verbose) {
-            std.log.info("zcheck: test {d}/{d}: ({any}, {any}, {any})", .{ tests_run + 1, config.num_tests, a, b, c });
+            std.log.info("zigcheck: test {d}/{d}: ({any}, {any}, {any})", .{ tests_run + 1, config.num_tests, a, b, c });
         }
 
         if (property(a, b, c)) |_| {

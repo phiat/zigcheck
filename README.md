@@ -1,4 +1,4 @@
-# zcheck
+# zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
 [![Tests](https://img.shields.io/badge/tests-128%2B_passing-brightgreen)](#running-tests)
@@ -13,10 +13,10 @@ Property-based testing for Zig. Generate random structured inputs, check propert
 ## Quick start
 
 ```zig
-const zcheck = @import("zcheck");
+const zigcheck = @import("zigcheck");
 
 test "addition is commutative" {
-    try zcheck.forAll(i32, zcheck.generators.int(i32), struct {
+    try zigcheck.forAll(i32, zigcheck.generators.int(i32), struct {
         fn prop(n: i32) !void {
             // This property holds for all integers
             if (n +% 1 != 1 +% n) return error.PropertyFalsified;
@@ -25,10 +25,10 @@ test "addition is commutative" {
 }
 ```
 
-When a property fails, zcheck automatically shrinks the counterexample to a minimal reproduction:
+When a property fails, zigcheck automatically shrinks the counterexample to a minimal reproduction:
 
 ```
---- zcheck: FAILED after 3 tests ----------------------
+--- zigcheck: FAILED after 3 tests ----------------------
   Counterexample: 10
   Shrunk (12 steps) from: 1847382901
   Reproduction seed: 0x2a
@@ -38,11 +38,11 @@ When a property fails, zcheck automatically shrinks the counterexample to a mini
 
 ## Installation
 
-Add zcheck as a Zig package dependency in your `build.zig.zon`:
+Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
-    .zcheck = .{
+    .zigcheck = .{
         .url = "https://github.com/phiat/zigcheck/archive/main.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
@@ -52,11 +52,11 @@ Add zcheck as a Zig package dependency in your `build.zig.zon`:
 Then in `build.zig`:
 
 ```zig
-const zcheck_dep = b.dependency("zcheck", .{});
-const zcheck_mod = zcheck_dep.module("zcheck");
+const zigcheck_dep = b.dependency("zigcheck", .{});
+const zigcheck_mod = zigcheck_dep.module("zigcheck");
 
 // Add to your test step:
-my_tests.root_module.addImport("zcheck", zcheck_mod);
+my_tests.root_module.addImport("zigcheck", zigcheck_mod);
 ```
 
 ## Generators
@@ -93,7 +93,7 @@ my_tests.root_module.addImport("zcheck", zcheck_mod);
 Slice shrinking tries shorter prefixes first (smallest to largest), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed:
 
 ```zig
-try zcheck.forAll([]const u8, zcheck.asciiString(50), struct {
+try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
     fn prop(s: []const u8) !void {
         // test your parser, serializer, etc.
         _ = s;
@@ -111,7 +111,7 @@ try zcheck.forAll([]const u8, zcheck.asciiString(50), struct {
 
 ```zig
 const Point = struct { x: i32, y: i32 };
-const g = zcheck.auto(Point);
+const g = zigcheck.auto(Point);
 // Generates random Points and shrinks each field independently
 ```
 
@@ -131,16 +131,16 @@ const g = zcheck.auto(Point);
 
 ```zig
 // Only test with positive even numbers
-const pos_even = comptime zcheck.filter(i32, zcheck.generators.int(i32), struct {
+const pos_even = comptime zigcheck.filter(i32, zigcheck.generators.int(i32), struct {
     fn pred(n: i32) bool {
         return n > 0 and @mod(n, 2) == 0;
     }
 }.pred);
 
 // Weighted choice: 90% small, 10% large
-const weighted = comptime zcheck.frequency(u32, &.{
-    .{ 9, zcheck.generators.intRange(u32, 0, 10) },
-    .{ 1, zcheck.generators.intRange(u32, 1000, 10000) },
+const weighted = comptime zigcheck.frequency(u32, &.{
+    .{ 9, zigcheck.generators.intRange(u32, 0, 10) },
+    .{ 1, zigcheck.generators.intRange(u32, 1000, 10000) },
 });
 ```
 
@@ -177,8 +177,8 @@ Test properties involving two or three values with independent shrinking:
 
 ```zig
 test "addition is commutative" {
-    try zcheck.forAll2(i32, i32,
-        zcheck.generators.int(i32), zcheck.generators.int(i32),
+    try zigcheck.forAll2(i32, i32,
+        zigcheck.generators.int(i32), zigcheck.generators.int(i32),
         struct {
             fn prop(a: i32, b: i32) !void {
                 if (a +% b != b +% a) return error.PropertyFalsified;
@@ -196,11 +196,11 @@ Use `assume()` to discard test cases that don't meet preconditions. The runner t
 
 ```zig
 test "division is inverse of multiplication" {
-    try zcheck.forAll2(i32, i32,
-        zcheck.generators.int(i32), zcheck.generators.intRange(i32, 1, 1000),
+    try zigcheck.forAll2(i32, i32,
+        zigcheck.generators.int(i32), zigcheck.generators.intRange(i32, 1, 1000),
         struct {
             fn prop(a: i32, b: i32) !void {
-                try zcheck.assume(b != 0); // skip division by zero
+                try zigcheck.assume(b != 0); // skip division by zero
                 const result = @divTrunc(a *% b, b);
                 if (result != a) return error.PropertyFalsified;
             }
@@ -214,7 +214,7 @@ test "division is inverse of multiplication" {
 Track the distribution of generated test cases with `forAllLabeled`:
 
 ```zig
-try zcheck.forAllLabeled(i32, zcheck.generators.int(i32),
+try zigcheck.forAllLabeled(i32, zigcheck.generators.int(i32),
     struct {
         fn prop(n: i32) !void {
             if (n == 0) return error.PropertyFalsified;
@@ -234,7 +234,7 @@ try zcheck.forAllLabeled(i32, zcheck.generators.int(i32),
 ## Configuration
 
 ```zig
-try zcheck.forAllWith(.{
+try zigcheck.forAllWith(.{
     .num_tests = 500,         // default: 100
     .max_shrinks = 2000,      // default: 1000
     .max_discard = 1000,      // default: 500
@@ -251,12 +251,12 @@ Config supports builder methods for per-property overrides (QuickCheck's `withMa
 
 ```zig
 const cfg = (Config{}).withNumTests(500).withMaxShrinks(2000).withSeed(0x2a);
-try zcheck.forAllWith(cfg, i32, gen, property);
+try zigcheck.forAllWith(cfg, i32, gen, property);
 ```
 
 ## Size parameter
 
-Like QuickCheck, zcheck threads a `size` parameter (0–100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
+Like QuickCheck, zigcheck threads a `size` parameter (0–100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
 
 Slice and string generators use size to scale the maximum length — at size 0, they generate minimum-length values; at size 100, they generate up to the configured maximum. Primitive generators (int, float, bool) ignore size and use the full range.
 
@@ -309,7 +309,7 @@ zig build test
 
 ```
 src/
-  zcheck.zig        # Public API re-exports
+  zigcheck.zig        # Public API re-exports
   gen.zig            # Gen(T) core type
   generators.zig     # Primitive generators (int, float, bool) + re-exports
   combinators.zig    # Combinators (constant, element, oneOf, map, filter, etc.)
@@ -317,6 +317,20 @@ src/
   auto.zig           # Auto-derivation (enum, struct, optional, union)
   shrink.zig         # ShrinkIter(T) and shrink state types
   runner.zig         # forAll/check engine with shrink loop
+```
+
+## Development
+
+Common tasks via [just](https://github.com/casey/just):
+
+```bash
+just test           # run all tests
+just test-verbose   # run with verbose output
+just test-filter "shrink"  # run tests matching a filter
+just fmt            # format source files
+just stats          # show project stats
+just push           # push to all remotes
+just clean          # clean build artifacts
 ```
 
 ## Built with
