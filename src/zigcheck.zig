@@ -94,7 +94,6 @@ pub const resize = generators.resize;
 pub const scale = generators.scale;
 pub const mapSize = generators.mapSize;
 pub const suchThatMap = generators.suchThatMap;
-pub const Fun = generators.Fun;
 pub const FunWith = generators.FunWith;
 pub const funGen = generators.funGen;
 pub const unicodeChar = generators.unicodeChar;

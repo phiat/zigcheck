@@ -470,9 +470,11 @@ pub fn suchThatMap(
                     if (f(a)) |b| return b;
                 }
                 std.log.info("zigcheck.suchThatMap: transform returned null {d} consecutive times", .{max_retries});
-                // Last resort: generate one more and force through
+                // Last resort: generate one more and force through.
+                // If it's still null, return zeroed memory — the property
+                // test will likely fail and report a useful counterexample.
                 const a = inner.generate(rng, allocator, size);
-                return f(a) orelse @as(B, undefined);
+                return f(a) orelse std.mem.zeroes(B);
             }
         }.gen,
         .shrinkFn = struct {
@@ -486,72 +488,10 @@ pub fn suchThatMap(
 
 // -- Function generation (CoArbitrary equivalent) -------------------------
 
-/// A generated "function" from A to B. This is zigcheck's equivalent of
-/// QuickCheck's CoArbitrary-based function generation.
-///
-/// Each Fun(A, B) instance represents a deterministic, pure function that
-/// maps different inputs to (generally) different outputs. The function's
-/// behavior is determined by its seed — different seeds produce different
-/// functions.
-///
-/// ```zig
-/// test "map preserves composition" {
-///     try zigcheck.forAll2(
-///         zigcheck.Fun(u32, u32), u32,
-///         zigcheck.funGen(u32, u32, zigcheck.generators.int(u32)),
-///         zigcheck.generators.int(u32),
-///         struct {
-///             fn prop(f: zigcheck.Fun(u32, u32), x: u32) !void {
-///                 // f is a random function — test properties about it
-///                 _ = f.call(x);
-///             }
-///         }.prop,
-///     );
-/// }
-/// ```
-pub fn Fun(comptime A: type, comptime B: type) type {
-    return struct {
-        seed: u64,
-
-        /// Call the function with an argument. Hashes the input to perturb
-        /// the seed, then generates a B value from the perturbed RNG.
-        /// This is deterministic: same Fun + same input = same output.
-        pub fn call(self: @This(), a: A) B {
-            // Hash the input to perturb the seed
-            var hasher = std.hash.Wyhash.init(self.seed);
-            std.hash.autoHash(&hasher, a);
-            var prng = std.Random.DefaultPrng.init(hasher.final());
-            // Generate B at size 100 (full range) with no allocator
-            // For types that need allocation, this produces a zero-length result
-            var buf: [4096]u8 = undefined;
-            var fba = std.heap.FixedBufferAllocator.init(&buf);
-            return gen_b_stored.generate(prng.random(), fba.allocator(), 100);
-        }
-
-        // Store the generator at comptime so call() can access it
-        const gen_b_stored: Gen(B) = blk: {
-            // This will be set by funGen
-            break :blk Gen(B){
-                .genFn = struct {
-                    fn f(_: std.Random, _: std.mem.Allocator, _: usize) B {
-                        return std.mem.zeroes(B);
-                    }
-                }.f,
-                .shrinkFn = struct {
-                    fn f(_: B, _: std.mem.Allocator) ShrinkIter(B) {
-                        return ShrinkIter(B).empty();
-                    }
-                }.f,
-            };
-        };
-
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("Fun(seed=0x{x})", .{self.seed});
-        }
-    };
-}
-
 /// Generate random functions from A to B. QuickCheck: `CoArbitrary a => Arbitrary (a -> b)`.
+///
+/// Returns `Gen(FunWith(A, B, gen_b))` — each generated function is
+/// deterministic and pure. Use `fun.call(a)` to invoke.
 ///
 /// Each generated function is deterministic and pure — the same input always
 /// produces the same output for a given Fun instance. Different Fun instances
@@ -597,8 +537,10 @@ pub fn funGen(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) Gen(Fu
     };
 }
 
-/// Internal: Fun type parameterized by the generator (so each funGen call
-/// produces a distinct type that carries its gen_b at comptime).
+/// A random pure function from A to B. Each instance holds a seed; calling
+/// `fun.call(a)` hashes the input to perturb the seed and generates a
+/// deterministic B value. Different seeds produce different functions.
+/// Use `funGen(A, B, gen_b)` to generate these.
 pub fn FunWith(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) type {
     return struct {
         seed: u64,

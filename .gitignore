@@ -1,14 +1,15 @@
-# Planning docs (not part of the library)
-AGENTS.md
-zig-quickcheck-plan.md
-zigcheck_examples.zig
-
 # Zig build artifacts
 zig-out/
 zig-cache/
 .zig-cache/
 *.a
+*.o
 
-# Tool directories
+# Tool/editor directories
 .claude/
 .beads/
+
+# Development files (not part of the library)
+AGENTS.md
+zig-quickcheck-plan.md
+zcheck_examples.zig
