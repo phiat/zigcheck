@@ -227,11 +227,17 @@ fn sliceAutoGen(comptime Child: type) Gen([]const Child) {
 }
 
 /// Generator for tagged unions -- picks a random variant, generates its payload.
+/// Note: constructs payload generators for all variants at comptime. For unions
+/// with many variants (50+), consider using a manual generator with `noShrink`
+/// if compile times are affected.
 fn unionGen(comptime T: type) Gen(T) {
     const info = @typeInfo(T).@"union";
     const fields = info.fields;
     comptime {
         if (fields.len == 0) @compileError("unionGen: union has no fields");
+        if (fields.len > 100) {
+            @compileLog("zigcheck.auto: union " ++ @typeName(T) ++ " has " ++ std.fmt.comptimePrint("{d}", .{fields.len}) ++ " variants; consider a manual generator if compile times are slow");
+        }
     }
     return .{
         .genFn = struct {
