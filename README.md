@@ -392,35 +392,39 @@ zig build test
 
 ## zigcheck vs Zig's built-in fuzz testing
 
-Zig has built-in [coverage-guided fuzz testing](https://ziglang.org/documentation/master/std/#std.testing.fuzz) (`std.testing.fuzz`). It feeds raw bytes to a function and uses code coverage to explore new paths — great for finding crashes in parsers and decoders. zigcheck is a different tool for a different job:
+Zig has built-in [coverage-guided fuzz testing](https://ziglang.org/documentation/master/std/#std.testing.fuzz) (`std.testing.fuzz`). It feeds raw bytes to a function and uses code coverage to steer toward unexplored paths. zigcheck is a different tool for a different job:
 
 | | Fuzz testing | zigcheck |
 |---|---|---|
 | **Input** | Raw bytes — you parse them | Typed, structured values via generators |
-| **Question** | "Does this crash?" | "Does this satisfy my invariant?" |
+| **Question** | "Does this crash on malformed input?" | "Does this satisfy my invariant on valid input?" |
 | **Duration** | Runs indefinitely, gets smarter over time | 100 tests in milliseconds, deterministic |
 | **On failure** | Gives you the crashing input | Shrinks to the *minimal* counterexample |
-| **Sweet spot** | Parsers, decoders, security boundaries | Business logic, roundtrips, algebraic properties, stateful APIs |
+| **Sweet spot** | Robustness — crashes, panics, memory errors | Correctness — logic bugs, broken invariants, spec violations |
 
-**Use both.** zigcheck catches "your logic is wrong" — fuzz testing catches "your code crashes." Different failure modes, same test suite:
+Consider an encoder/decoder. Both tools test it, but they ask different questions:
 
 ```zig
-// zigcheck: does my logic satisfy this property?
-test "sort is idempotent" {
-    try zigcheck.forAll(
-        zigcheck.sliceOf(zigcheck.generators.int(i32), 100),
-        struct { fn prop(xs: []const i32) !void {
-            // sort(sort(x)) == sort(x)
-        } }.prop);
+// zigcheck: does encode→decode preserve the value? (logical correctness)
+test "roundtrip preserves data" {
+    try zigcheck.forAll(zigcheck.auto(User), struct {
+        fn prop(user: User) !void {
+            const bytes = try encode(user);
+            const decoded = try decode(bytes);
+            try std.testing.expectEqual(user.id, decoded.id);
+        }
+    }.prop);
 }
 
-// fuzz: does my parser survive arbitrary input?
-test "parser doesn't crash" {
+// fuzz: does decode survive arbitrary bytes? (robustness)
+test "decoder doesn't crash" {
     try std.testing.fuzz(.{}, struct {
-        fn f(bytes: []const u8) void { _ = MyParser.parse(bytes); }
+        fn f(bytes: []const u8) void { _ = decode(bytes); }
     }.f);
 }
 ```
+
+zigcheck catches "your encoder drops the `email` field." Fuzz testing catches "your decoder panics on a truncated header." **Use both.**
 
 ## Project structure
 
