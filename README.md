@@ -1,7 +1,7 @@
 # zcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-126%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-128%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-30%2B-blueviolet)](#generators)
@@ -247,6 +247,13 @@ try zcheck.forAllWith(.{
 
 Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
 
+Config supports builder methods for per-property overrides (QuickCheck's `withMaxSuccess`, `withMaxShrinks`, etc.):
+
+```zig
+const cfg = (Config{}).withNumTests(500).withMaxShrinks(2000).withSeed(0x2a);
+try zcheck.forAllWith(cfg, i32, gen, property);
+```
+
 ## Size parameter
 
 Like QuickCheck, zcheck threads a `size` parameter (0–100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
@@ -266,6 +273,7 @@ Slice and string generators use size to scale the maximum length — at size 0, 
 | `check(config, T, gen, property)` | Return `CheckResult` without failing |
 | `check2(config, A, B, gen_a, gen_b, property)` | Two-argument check returning result |
 | `check3(config, A, B, C, gen_a, gen_b, gen_c, property)` | Three-argument check returning result |
+| `recheck(T, gen, property, result)` | Replay a failed `CheckResult` (QuickCheck `recheck`) |
 
 ### Property helpers
 

@@ -44,6 +44,7 @@ pub const CheckResultLabeled = runner.CheckResultLabeled;
 pub const CoverageResult = runner.CoverageResult;
 pub const CoverageRequirement = runner.CoverageRequirement;
 pub const forAllCover = runner.forAllCover;
+pub const recheck = runner.recheck;
 pub const forAllCollect = runner.forAllCollect;
 pub const forAllTabulate = runner.forAllTabulate;
 pub const conjoin = runner.conjoin;

@@ -99,7 +99,9 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
                 // We don't know which generator produced the value, so try
-                // all generators' shrinkers. This over-shrinks but is correct.
+                // all generators' shrinkers in round-robin order. This gives
+                // each shrinker a fair share of the shrink budget rather than
+                // exhausting one before trying the next.
                 const iters = allocator.alloc(ShrinkIter(T), gens.len) catch return ShrinkIter(T).empty();
                 inline for (gens, 0..) |g, i| {
                     iters[i] = g.shrink(value, allocator);
@@ -108,23 +110,28 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
                 const State = struct {
                     iters_arr: []ShrinkIter(T),
                     pos: usize,
+                    exhausted: usize,
                 };
                 const state = allocator.create(State) catch {
                     allocator.free(iters);
                     return ShrinkIter(T).empty();
                 };
-                state.* = .{ .iters_arr = iters, .pos = 0 };
+                state.* = .{ .iters_arr = iters, .pos = 0, .exhausted = 0 };
 
                 return .{
                     .context = @ptrCast(state),
                     .nextFn = struct {
                         fn next(ctx: *anyopaque) ?T {
                             const s: *State = @ptrCast(@alignCast(ctx));
-                            while (s.pos < s.iters_arr.len) {
-                                if (s.iters_arr[s.pos].next()) |val| {
+                            // Round-robin across shrinkers
+                            var tried: usize = 0;
+                            while (tried < s.iters_arr.len) {
+                                const idx = s.pos % s.iters_arr.len;
+                                s.pos += 1;
+                                if (s.iters_arr[idx].next()) |val| {
                                     return val;
                                 }
-                                s.pos += 1;
+                                tried += 1;
                             }
                             return null;
                         }
@@ -237,7 +244,8 @@ pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Ge
         }.gen,
         .shrinkFn = struct {
             fn shrinkFn(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                // We don't know which generator produced the value, so try all shrinkers
+                // We don't know which generator produced the value, so try
+                // all generators' shrinkers in round-robin order.
                 const iters = allocator.alloc(ShrinkIter(T), weighted.len) catch return ShrinkIter(T).empty();
                 inline for (weighted, 0..) |entry, i| {
                     iters[i] = entry[1].shrink(value, allocator);
@@ -258,11 +266,14 @@ pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Ge
                     .nextFn = struct {
                         fn next(ctx: *anyopaque) ?T {
                             const s: *State = @ptrCast(@alignCast(ctx));
-                            while (s.pos < s.iters_arr.len) {
-                                if (s.iters_arr[s.pos].next()) |val| {
+                            var tried: usize = 0;
+                            while (tried < s.iters_arr.len) {
+                                const idx = s.pos % s.iters_arr.len;
+                                s.pos += 1;
+                                if (s.iters_arr[idx].next()) |val| {
                                     return val;
                                 }
-                                s.pos += 1;
+                                tried += 1;
                             }
                             return null;
                         }

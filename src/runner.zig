@@ -64,6 +64,41 @@ pub const Config = struct {
     /// internal arena for generated values, so this is not needed for
     /// basic usage. Defaults to std.testing.allocator.
     allocator: std.mem.Allocator = std.testing.allocator,
+
+    /// Override the number of test cases. QuickCheck: `withMaxSuccess`.
+    pub fn withNumTests(self: Config, n: usize) Config {
+        var c = self;
+        c.num_tests = n;
+        return c;
+    }
+
+    /// Override the maximum number of shrink attempts. QuickCheck: `withMaxShrinks`.
+    pub fn withMaxShrinks(self: Config, n: usize) Config {
+        var c = self;
+        c.max_shrinks = n;
+        return c;
+    }
+
+    /// Override the maximum number of discarded test cases. QuickCheck: `withMaxDiscardRatio`.
+    pub fn withMaxDiscard(self: Config, n: usize) Config {
+        var c = self;
+        c.max_discard = n;
+        return c;
+    }
+
+    /// Set a deterministic seed. QuickCheck: `withSeed`.
+    pub fn withSeed(self: Config, s: u64) Config {
+        var c = self;
+        c.seed = s;
+        return c;
+    }
+
+    /// Enable verbose output. QuickCheck: `verbose`.
+    pub fn withVerbose(self: Config) Config {
+        var c = self;
+        c.verbose = true;
+        return c;
+    }
 };
 
 /// Run a property check expecting it to fail. Returns an error if the
@@ -165,6 +200,29 @@ pub fn forAllWith(
             logGaveUp(g.num_tests, g.num_discarded);
             return error.GaveUp;
         },
+    }
+}
+
+/// Replay a previously failed property check using its seed.
+/// QuickCheck: `recheck`. Runs a single test with the same seed to reproduce
+/// the failure, then shrinks again.
+///
+/// ```zig
+/// const result = zcheck.check(.{}, u32, gen, property);
+/// // ... later, replay the failure:
+/// try zcheck.recheck(u32, gen, property, result);
+/// ```
+pub fn recheck(
+    comptime T: type,
+    gen: Gen(T),
+    property: *const fn (T) anyerror!void,
+    result: CheckResult(T),
+) !void {
+    switch (result) {
+        .failed => |f| {
+            return forAllWith(.{ .seed = f.seed, .num_tests = f.num_tests_before_fail }, T, gen, property);
+        },
+        else => {}, // nothing to replay if it didn't fail
     }
 }
 
@@ -1549,6 +1607,42 @@ test "disjoin: at least one property must hold" {
             }
         }.prop,
     });
+}
+
+test "Config builder methods" {
+    const base = Config{};
+    const c = base.withNumTests(500).withMaxShrinks(2000).withMaxDiscard(1000).withSeed(42).withVerbose();
+    try std.testing.expectEqual(@as(usize, 500), c.num_tests);
+    try std.testing.expectEqual(@as(usize, 2000), c.max_shrinks);
+    try std.testing.expectEqual(@as(usize, 1000), c.max_discard);
+    try std.testing.expectEqual(@as(?u64, 42), c.seed);
+    try std.testing.expect(c.verbose);
+}
+
+test "recheck: replays a failed property" {
+    const prop = struct {
+        fn f(n: u32) !void {
+            if (n >= 10) return error.PropertyFalsified;
+        }
+    }.f;
+    const gen = generators.int(u32);
+
+    // First run — get a failure
+    const result = check(.{ .seed = 42 }, u32, gen, prop);
+    switch (result) {
+        .failed => |f| {
+            // Recheck should also fail with the same counterexample
+            const result2 = check(.{ .seed = f.seed, .num_tests = f.num_tests_before_fail }, u32, gen, prop);
+            switch (result2) {
+                .failed => |f2| {
+                    try std.testing.expectEqual(f.original, f2.original);
+                    try std.testing.expectEqual(f.shrunk, f2.shrunk);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "verbose mode determinism: same results as non-verbose" {
