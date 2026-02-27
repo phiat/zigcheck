@@ -390,6 +390,38 @@ Failing sequences are automatically shrunk by removing chunks of commands (same 
 zig build test
 ```
 
+## zigcheck vs Zig's built-in fuzz testing
+
+Zig has built-in [coverage-guided fuzz testing](https://ziglang.org/documentation/master/std/#std.testing.fuzz) (`std.testing.fuzz`). It feeds raw bytes to a function and uses code coverage to explore new paths — great for finding crashes in parsers and decoders. zigcheck is a different tool for a different job:
+
+| | Fuzz testing | zigcheck |
+|---|---|---|
+| **Input** | Raw bytes — you parse them | Typed, structured values via generators |
+| **Question** | "Does this crash?" | "Does this satisfy my invariant?" |
+| **Duration** | Runs indefinitely, gets smarter over time | 100 tests in milliseconds, deterministic |
+| **On failure** | Gives you the crashing input | Shrinks to the *minimal* counterexample |
+| **Sweet spot** | Parsers, decoders, security boundaries | Business logic, roundtrips, algebraic properties, stateful APIs |
+
+**Use both.** zigcheck catches "your logic is wrong" — fuzz testing catches "your code crashes." Different failure modes, same test suite:
+
+```zig
+// zigcheck: does my logic satisfy this property?
+test "sort is idempotent" {
+    try zigcheck.forAll(
+        zigcheck.sliceOf(zigcheck.generators.int(i32), 100),
+        struct { fn prop(xs: []const i32) !void {
+            // sort(sort(x)) == sort(x)
+        } }.prop);
+}
+
+// fuzz: does my parser survive arbitrary input?
+test "parser doesn't crash" {
+    try std.testing.fuzz(.{}, struct {
+        fn f(bytes: []const u8) void { _ = MyParser.parse(bytes); }
+    }.f);
+}
+```
+
 ## Project structure
 
 ```
