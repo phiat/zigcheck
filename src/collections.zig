@@ -226,6 +226,9 @@ pub fn unicodeChar() Gen(u21) {
 }
 
 /// Generator for random Unicode strings (valid UTF-8) up to max_codepoints.
+///
+/// Shrinking tries shorter prefixes only (not individual codepoint simplification).
+/// This preserves UTF-8 validity but is less thorough than ASCII string shrinking.
 pub fn unicodeString(comptime max_codepoints: usize) Gen([]const u8) {
     return .{
         .genFn = struct {

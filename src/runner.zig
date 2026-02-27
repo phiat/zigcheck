@@ -720,12 +720,16 @@ pub fn forAllCollect(
 ) !void {
     var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer label_arena.deinit();
-    const alloc = label_arena.allocator();
+    const label_alloc = label_arena.allocator();
+
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
-    var label_map = std.StringHashMap(usize).init(alloc);
+    var label_map = std.StringHashMap(usize).init(label_alloc);
     var tests_run: usize = 0;
     var discards: usize = 0;
 
@@ -734,16 +738,18 @@ pub fn forAllCollect(
             logGaveUp(tests_run, discards);
             return error.GaveUp;
         }
+        _ = gen_arena.reset(.retain_capacity);
         const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
-        const value = gen.generate(rng, alloc, size);
+        const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
-            const label = std.fmt.allocPrint(alloc, "{any}", .{value}) catch continue;
-            const entry = label_map.getOrPut(label) catch continue;
-            if (!entry.found_existing) {
-                entry.value_ptr.* = 0;
+            // Format the label into the label arena (survives gen_arena reset).
+            const label = std.fmt.allocPrint(label_alloc, "{any}", .{value}) catch continue;
+            const gop = label_map.getOrPut(label) catch continue;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = 0;
             }
-            entry.value_ptr.* += 1;
+            gop.value_ptr.* += 1;
             tests_run += 1;
         } else |err| {
             if (err == TestDiscarded) {
@@ -791,12 +797,16 @@ pub fn forAllTabulate(
 ) !void {
     var label_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer label_arena.deinit();
-    const alloc = label_arena.allocator();
+    const label_alloc = label_arena.allocator();
+
+    var gen_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gen_arena.deinit();
+    const gen_alloc = gen_arena.allocator();
 
     const seed = resolveSeed(config);
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
-    var label_map = std.StringHashMap(usize).init(alloc);
+    var label_map = std.StringHashMap(usize).init(label_alloc);
     var tests_run: usize = 0;
     var discards: usize = 0;
 
@@ -805,18 +815,20 @@ pub fn forAllTabulate(
             logGaveUp(tests_run, discards);
             return error.GaveUp;
         }
+        _ = gen_arena.reset(.retain_capacity);
         const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
-        const value = gen.generate(rng, alloc, size);
+        const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
             const labels = classifier(value);
             for (labels) |label| {
-                const prefixed = std.fmt.allocPrint(alloc, table_name ++ "/{s}", .{label}) catch continue;
-                const entry = label_map.getOrPut(prefixed) catch continue;
-                if (!entry.found_existing) {
-                    entry.value_ptr.* = 0;
+                // Format into label arena (survives gen_arena reset).
+                const prefixed = std.fmt.allocPrint(label_alloc, table_name ++ "/{s}", .{label}) catch continue;
+                const gop = label_map.getOrPut(prefixed) catch continue;
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = 0;
                 }
-                entry.value_ptr.* += 1;
+                gop.value_ptr.* += 1;
             }
             tests_run += 1;
         } else |err| {
@@ -999,10 +1011,14 @@ pub fn forAllCtxWith(
                 discards += 1;
                 continue;
             }
-            // Shrink using a wrapper that ignores the context
+            // Shrink using a wrapper that ignores the context.
+            // The dummy context uses a fixed buffer — its allocations are
+            // discarded each call, so overflow is harmless (silently drops labels).
             const shrunk = doShrink(T, gen, struct {
                 fn wrapper(v: T) anyerror!void {
-                    var dummy_ctx = PropertyContext.init(std.heap.page_allocator);
+                    var buf: [4096]u8 = undefined;
+                    var fba = std.heap.FixedBufferAllocator.init(&buf);
+                    var dummy_ctx = PropertyContext.init(fba.allocator());
                     return property(v, &dummy_ctx);
                 }
             }.wrapper, value, config.max_shrinks, config.verbose_shrink);
