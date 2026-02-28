@@ -38,6 +38,36 @@ pub fn Gen(comptime T: type) type {
         pub fn shrink(self: Self, value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
             return self.shrinkFn(value, allocator);
         }
+
+        /// Construct a generator from just a generation function, with no shrinking.
+        ///
+        /// This is a convenience for custom generators where shrinking is not
+        /// meaningful or not yet implemented. Equivalent to setting `shrinkFn`
+        /// to `ShrinkIter(T).empty()`.
+        ///
+        /// ```zig
+        /// fn identGen() Gen([]const u8) {
+        ///     return Gen([]const u8).fromGenFn(struct {
+        ///         fn f(rng: std.Random, allocator: std.mem.Allocator, _: usize) []const u8 {
+        ///             const charset = "abcdefghijklmnopqrstuvwxyz";
+        ///             const len = rng.intRangeAtMost(usize, 1, 12);
+        ///             const buf = allocator.alloc(u8, len) catch return "x";
+        ///             for (buf) |*c| c.* = charset[rng.intRangeAtMost(usize, 0, charset.len - 1)];
+        ///             return buf;
+        ///         }
+        ///     }.f);
+        /// }
+        /// ```
+        pub fn fromGenFn(comptime genFn: *const fn (rng: std.Random, allocator: std.mem.Allocator, size: usize) T) Self {
+            return .{
+                .genFn = genFn,
+                .shrinkFn = struct {
+                    fn noShrink(_: T, _: std.mem.Allocator) ShrinkIter(T) {
+                        return ShrinkIter(T).empty();
+                    }
+                }.noShrink,
+            };
+        }
     };
 }
 
@@ -61,4 +91,41 @@ test "Gen: basic construction and generation" {
     const val = g.generate(prng.random(), std.testing.allocator, 100);
     // Just verify it doesn't crash and produces a value
     _ = val;
+}
+
+test "Gen.fromGenFn: construct without shrink boilerplate" {
+    const g = Gen(u32).fromGenFn(struct {
+        fn f(rng: std.Random, _: std.mem.Allocator, _: usize) u32 {
+            return rng.int(u32);
+        }
+    }.f);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const val = g.generate(prng.random(), std.testing.allocator, 100);
+    _ = val;
+
+    // Verify shrinking returns empty iterator
+    var si = g.shrink(42, std.testing.allocator);
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "Gen.fromGenFn: works with allocating generators" {
+    const g = Gen([]const u8).fromGenFn(struct {
+        fn f(rng: std.Random, allocator: std.mem.Allocator, _: usize) []const u8 {
+            const charset = "abcdefghijklmnopqrstuvwxyz";
+            const len = rng.intRangeAtMost(usize, 1, 12);
+            const buf = allocator.alloc(u8, len) catch return "x";
+            for (buf) |*c| c.* = charset[rng.intRangeAtMost(usize, 0, charset.len - 1)];
+            return buf;
+        }
+    }.f);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng2 = std.Random.DefaultPrng.init(42);
+    const val = g.generate(prng2.random(), arena_state.allocator(), 100);
+    try std.testing.expect(val.len >= 1 and val.len <= 12);
+    for (val) |c| {
+        try std.testing.expect(c >= 'a' and c <= 'z');
+    }
 }

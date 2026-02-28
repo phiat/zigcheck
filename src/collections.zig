@@ -798,6 +798,32 @@ test "shuffle: shrinker tries to restore original order" {
     try std.testing.expectEqual(@as(u32, 1), first[2]);
 }
 
+test "sliceOfRange + element: custom charset string generation" {
+    // Verify the pattern: sliceOfRange(element(u8, charset), min, max) works
+    // for generating strings from arbitrary character classes.
+    const charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const g = comptime combinators.sliceOfRange(combinators.element(u8, charset), 1, 12);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+
+    for (0..100) |_| {
+        const val = g.generate(prng.random(), arena_state.allocator(), 100);
+        try std.testing.expect(val.len >= 1 and val.len <= 12);
+        for (val) |c| {
+            var found = false;
+            for (charset) |valid| {
+                if (c == valid) {
+                    found = true;
+                    break;
+                }
+            }
+            try std.testing.expect(found);
+        }
+    }
+}
+
 test "shuffle: already sorted has no shrinks" {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();

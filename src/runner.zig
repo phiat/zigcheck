@@ -96,10 +96,6 @@ pub const Config = struct {
     /// bound of the size ramp (0 to max_size across the test run).
     /// QuickCheck default is 100.
     max_size: usize = 100,
-    /// Allocator available for user-side test helpers. The runner uses an
-    /// internal arena for generated values, so this is not needed for
-    /// basic usage. Defaults to std.testing.allocator.
-    allocator: std.mem.Allocator = std.testing.allocator,
 
     /// Override the number of test cases. QuickCheck: `withMaxSuccess`.
     pub fn withNumTests(self: Config, n: usize) Config {

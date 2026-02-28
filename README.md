@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-164%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-169%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.3.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -31,6 +31,11 @@ test "integers survive format/parse roundtrip" {
 }
 ```
 
+> **Why `struct { fn prop(...) ... }.prop`?** Zig has no anonymous function literals.
+> This pattern — declaring a function inside an anonymous struct and taking its
+> pointer — is the idiomatic workaround. It appears in every zigcheck property.
+> You are not doing it wrong; this is the correct form.
+
 This pattern — encode, decode, compare — transfers directly to JSON, protobuf, custom wire formats, anything with a serialization layer.
 
 When a property fails, zigcheck **automatically shrinks** the counterexample to the smallest failing input:
@@ -56,6 +61,144 @@ test "utf-8 encoding roundtrips all code points" {
             const decoded = std.unicode.utf8Decode(buf[0..len]) catch
                 return error.PropertyFalsified;
             if (decoded != codepoint) return error.PropertyFalsified;
+        }
+    }.prop);
+}
+```
+
+## Multi-argument properties
+
+Test properties over multiple independently-generated values with `forAllZip`. Each argument is generated and shrunk independently:
+
+```zig
+test "addition is commutative" {
+    try zigcheck.forAllZip(.{
+        zigcheck.generators.int(i32),
+        zigcheck.generators.int(i32),
+    }, struct {
+        fn prop(a: i32, b: i32) !void {
+            if (a +% b != b +% a) return error.PropertyFalsified;
+        }
+    }.prop);
+}
+```
+
+Works with any number of generators. Use `forAllZipWith` for explicit config:
+
+```zig
+try zigcheck.forAllZipWith(.{ .num_tests = 500, .seed = 0x1 }, .{
+    zigcheck.generators.int(i32),
+    zigcheck.generators.asciiString(50),
+}, struct {
+    fn prop(n: i32, s: []const u8) !void {
+        _ = n;
+        _ = s;
+    }
+}.prop);
+```
+
+When shrinking, each argument shrinks independently toward its minimal failing value. A failing case `(10000, "hello world")` shrinks to something like `(1, "a")`.
+
+## Struct generators
+
+You have a struct and you need a generator. Use this decision tree:
+
+**1. All fields are primitive or standard types?** Use `auto(T)`.
+
+It derives generators for every field via comptime reflection and shrinks each field independently.
+
+```zig
+const Point = struct { x: i32, y: i32 };
+try zigcheck.forAll(Point, zigcheck.auto(Point), prop);
+```
+
+**2. Some fields need domain-specific generators?** Use `build(T, .{ ... })`.
+
+Provide one generator per field in declaration order. You get per-field shrinking for free. **This is the recommended default for struct generators with any domain constraints.**
+
+```zig
+const DefnSpec = struct {
+    ret_type: []const u8,
+    fn_name:  []const u8,
+    arity:    u8,
+};
+
+fn defnSpecGen() zigcheck.Gen(DefnSpec) {
+    return zigcheck.build(DefnSpec, .{
+        typeGen(),                              // ret_type
+        identGen(),                             // fn_name
+        zigcheck.generators.intRange(u8, 0, 4), // arity
+    });
+}
+```
+
+**3. Fields have cross-field dependencies?** Write a manual generator.
+
+Use `Gen(T).fromGenFn` to skip shrink boilerplate, or `assume()` in the property to discard invalid combinations:
+
+```zig
+fn pairedRangeGen() zigcheck.Gen(Range) {
+    return zigcheck.Gen(Range).fromGenFn(struct {
+        fn f(rng: std.Random, alloc: std.mem.Allocator, size: usize) Range {
+            const lo = zigcheck.generators.int(i32).generate(rng, alloc, size);
+            const hi = lo +| zigcheck.generators.positive(i32).generate(rng, alloc, size);
+            return .{ .lo = lo, .hi = hi };
+        }
+    }.f);
+}
+```
+
+Note: `fromGenFn` produces no shrink candidates. If shrinking matters, decompose into independent sub-generators and use `build`.
+
+**4. The type should carry its own generator?** Declare `pub const zigcheck_gen` on the type.
+
+`auto(T)` checks for this before deriving. Use sparingly — it couples test infrastructure into production types. Prefer `build` or a standalone generator function for test-only types.
+
+```zig
+const Money = struct {
+    cents: u32,
+    pub const zigcheck_gen = zigcheck.Gen(Money){
+        .genFn = &struct { fn f(rng: std.Random, _: std.mem.Allocator, _: usize) Money {
+            return .{ .cents = rng.intRangeAtMost(u32, 0, 100_00) }; // $0-$100
+        } }.f,
+        .shrinkFn = &struct { fn f(_: Money, _: std.mem.Allocator) @import("zigcheck").ShrinkIter(Money) {
+            return @import("zigcheck").ShrinkIter(Money).empty();
+        } }.f,
+    };
+};
+// zigcheck.auto(Money) uses zigcheck_gen instead of deriving from fields
+```
+
+### Custom string generators
+
+Need strings from a specific character set (e.g. valid identifiers)? Compose `element` with `sliceOfRange`:
+
+```zig
+const ident_chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
+const identGen = comptime zigcheck.sliceOfRange(
+    zigcheck.element(u8, ident_chars), 1, 12,
+);
+// Generates strings of 1-12 chars from ident_chars, with full shrinking
+```
+
+This works because `element(u8, charset)` is a `Gen(u8)` and `sliceOfRange` builds a `Gen([]const u8)` from any `Gen(u8)`. You get slice shrinking (removing chunks) plus element shrinking (toward earlier characters in the charset) for free.
+
+### Pattern: spec-then-build for roundtrip testing
+
+Generate a lightweight spec struct, then derive the actual test input from it. The spec is what zigcheck generates and shrinks; the real input is constructed from it. This produces readable counterexamples — you see spec fields, not raw strings:
+
+```zig
+const DefnSpec = struct { ret_type: []const u8, fn_name: []const u8, arity: u8 };
+
+test "parse-emit roundtrip" {
+    try zigcheck.forAll(DefnSpec, defnSpecGen(), struct {
+        fn prop(spec: DefnSpec) !void {
+            const source = buildSource(spec, std.testing.allocator) orelse return;
+            defer std.testing.allocator.free(source);
+            const output = parseAndEmit(source, std.testing.allocator) orelse
+                return error.PropertyFalsified;
+            defer std.testing.allocator.free(output);
+            // assert on output using spec fields as ground truth
         }
     }.prop);
 }
@@ -132,32 +275,8 @@ try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
 
 | Generator | Type | Description |
 |---|---|---|
-| `auto(T)` | `Gen(T)` | Auto-derive from `int`, `float`, `bool`, `enum`, `struct`, `?T`, `[]const T`, `union(enum)` |
-
-`auto` handles nested structs and enums via comptime reflection:
-
-```zig
-const Point = struct { x: i32, y: i32 };
-const g = zigcheck.auto(Point);
-// Generates random Points and shrinks each field independently
-```
-
-Types can override auto-derivation by declaring a `zigcheck_gen` constant:
-
-```zig
-const Money = struct {
-    cents: u32,
-    pub const zigcheck_gen = zigcheck.Gen(Money){
-        .genFn = &struct { fn f(rng: std.Random, _: std.mem.Allocator, _: usize) Money {
-            return .{ .cents = rng.intRangeAtMost(u32, 0, 100_00) }; // $0-$100
-        } }.f,
-        .shrinkFn = &struct { fn f(_: Money, _: std.mem.Allocator) @import("zigcheck").ShrinkIter(Money) {
-            return @import("zigcheck").ShrinkIter(Money).empty();
-        } }.f,
-    };
-};
-// zigcheck.auto(Money) uses zigcheck_gen instead of deriving from fields
-```
+| `auto(T)` | `Gen(T)` | Auto-derive from `int`, `float`, `bool`, `enum`, `struct`, `?T`, `[]const T`, `union(enum)`. See [Struct generators](#struct-generators) for the full decision tree. |
+| `Gen(T).fromGenFn(fn)` | `Gen(T)` | Construct a generator from just a generation function, with no shrinking. |
 
 ### Combinators
 
@@ -178,7 +297,7 @@ const Money = struct {
 | `mapSize(T, gen, fn)` | `Gen(T)` | Transform size parameter with a function |
 | `suchThatMap(A, B, gen, fn)` | `Gen(B)` | Filter and transform in one step |
 | `funGen(A, B, gen_b)` | `Gen(FunWith(A,B,gen_b))` | Generate random pure functions (QuickCheck `Fun`) |
-| `build(T, gens)` | `Gen(T)` | Struct builder with per-field generators (shrinks independently) |
+| `build(T, gens)` | `Gen(T)` | **Recommended for structs.** Per-field generators with independent shrinking. See [Struct generators](#struct-generators). |
 | `zip(gens)` | `Gen(Tuple)` | Combine generators into a tuple `Gen(struct { A, B, ... })` |
 | `arrayOf(T, gen, N)` | `Gen([N]T)` | Fixed-size array with per-element shrinking |
 | `zipMap(gens, R, fn)` | `Gen(R)` | Zip generators + map with splatted args |
@@ -226,25 +345,6 @@ Every generator comes with a built-in shrinker that converges toward a minimal c
 | `filter` | Inner shrinker, filtered by predicate |
 
 The runner uses an arena allocator for shrink state, freed in bulk when shrinking completes. Enable `.verbose_shrink = true` to see each shrink step.
-
-## Multi-argument properties
-
-Test properties involving multiple values with independent per-argument shrinking via `forAllZip`:
-
-```zig
-test "addition is commutative" {
-    try zigcheck.forAllZip(.{
-        zigcheck.generators.int(i32),
-        zigcheck.generators.int(i32),
-    }, struct {
-        fn prop(a: i32, b: i32) !void {
-            if (a +% b != b +% a) return error.PropertyFalsified;
-        }
-    }.prop);
-}
-```
-
-Works with any number of generators. Use `forAllZipWith` for explicit config.
 
 ## Implication / preconditions
 
@@ -298,7 +398,6 @@ try zigcheck.forAllWith(.{
     .verbose = true,          // default: false
     .verbose_shrink = true,   // default: false
     .max_size = 200,          // default: 100
-    .allocator = my_alloc,    // default: std.testing.allocator
 }, i32, gen, property);
 ```
 
@@ -310,6 +409,8 @@ Config supports builder methods for per-property overrides (QuickCheck's `withMa
 const cfg = (Config{}).withNumTests(500).withMaxShrinks(2000).withSeed(0x2a);
 try zigcheck.forAllWith(cfg, i32, gen, property);
 ```
+
+Properties that need to allocate working memory should use `std.testing.allocator` directly. The runner's internal arena is for generated values only and is not exposed to property functions.
 
 ## Size parameter
 
@@ -455,7 +556,7 @@ test "roundtrip is coverage-guided" {
 ```
 src/
   zigcheck.zig        # Public API re-exports
-  gen.zig            # Gen(T) core type
+  gen.zig            # Gen(T) core type + fromGenFn
   generators.zig     # Primitive generators (int, float, bool) + re-exports
   combinators.zig    # Combinators (constant, element, oneOf, map, filter, etc.)
   collections.zig    # Slice, string, unicode, shuffle, sublist, ordered list
