@@ -134,7 +134,7 @@ fn defnSpecGen() zigcheck.Gen(DefnSpec) {
 
 **3. Fields have cross-field dependencies?** Write a manual generator.
 
-Use `Gen(T).fromGenFn` to skip shrink boilerplate, or `assume()` in the property to discard invalid combinations:
+Use `Gen(T).fromGenFn` for a quick generator with no shrinking, or `assume()` in the property to discard invalid combinations:
 
 ```zig
 fn pairedRangeGen() zigcheck.Gen(Range) {
@@ -290,7 +290,7 @@ try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
 | `frequency(T, weighted)` | `Gen(T)` | Weighted choice from `{weight, gen}` pairs |
 | `map(A, B, gen, fn)` | `Gen(B)` | Transform output type (no shrinking; use `shrinkMap`) |
 | `mapAlloc(A, B, gen, fn)` | `Gen(B)` | Like `map` but `fn` receives the arena allocator |
-| `filter(T, gen, pred)` | `Gen(T)` | Retry until predicate holds |
+| `filter(T, gen, pred)` | `Gen(T)` | Retry up to 1000 times; logs warning if exhausted. Prefer `assume()` for restrictive predicates. |
 | `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation (no shrinking) |
 | `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
 | `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
@@ -307,6 +307,7 @@ try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
 | `zipMap(gens, R, fn)` | `Gen(R)` | Zip generators + map with splatted args |
 | `sliceOf(gen, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `slice`) |
 | `sliceOfRange(gen, min, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `sliceRange`) |
+| `GenType(gen)` | `type` | Extract the value type `T` from a `Gen(T)` |
 
 ```zig
 // Only test with positive even numbers
@@ -482,6 +483,8 @@ try Spec.runWith(.{ .num_tests = 100, .max_commands = 30 }, .{
     .postcondition = postCond,
 });
 ```
+
+If your SUT holds resources (sockets, arenas, file handles), pass `.cleanup_sut = myCleanupFn` to free them after each test sequence.
 
 Failing sequences are automatically shrunk by removing chunks of commands (same strategy as slice shrinking), producing minimal counterexamples.
 

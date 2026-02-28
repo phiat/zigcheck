@@ -12,21 +12,22 @@ const ShrinkIter = @import("shrink.zig").ShrinkIter;
 /// to build complex generators from simple ones.
 ///
 /// The `size` parameter controls the "magnitude" of generated values.
-/// The runner threads size linearly from 0 to 100 across test cases,
-/// so early tests use small values and later tests use large ones.
-/// Generators that don't use size simply ignore it.
+/// The runner threads size linearly from 0 to `max_size` (default 100)
+/// across test cases, so early tests use small values and later tests
+/// use large ones. Generators that don't use size simply ignore it.
 pub fn Gen(comptime T: type) type {
     return struct {
         const Self = @This();
 
         /// Generate a random value. May allocate (slices, strings).
-        /// `size` grows from 0 to 100 across a test run — use it to
-        /// control the magnitude of generated values.
+        /// `size` grows from 0 to `max_size` across a test run — use it
+        /// to control the magnitude of generated values.
         genFn: *const fn (rng: std.Random, allocator: std.mem.Allocator, size: usize) T,
 
         /// Produce shrink candidates for a value. The returned iterator
-        /// yields progressively simpler values. The allocator is used to
-        /// heap-allocate mutable shrink state.
+        /// yields progressively simpler values. The allocator should be an
+        /// arena — shrink functions may allocate iteratively without freeing,
+        /// relying on bulk deallocation when shrinking completes.
         shrinkFn: *const fn (value: T, allocator: std.mem.Allocator) ShrinkIter(T),
 
         /// Generate a random value with the given size parameter.

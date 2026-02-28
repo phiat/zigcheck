@@ -466,8 +466,10 @@ fn doShrink(
 
     // Arena is NOT reset between iterations because `best` may hold pointers
     // into arena memory (e.g., if T contains slices). The arena is freed in
-    // bulk at the end via defer deinit. Memory growth is bounded by max_shrinks
-    // * sizeof(shrink state) which is negligible.
+    // bulk at the end via defer deinit. Memory grows O(max_shrinks * value_size)
+    // for collection types — e.g., shrinking a 10KB slice over 1000 steps may
+    // accumulate ~10MB. This is acceptable for testing; if it becomes a problem,
+    // reduce max_shrinks via Config.
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
 
@@ -1202,7 +1204,8 @@ pub fn forAllZip(comptime gens: anytype, comptime property: anytype) !void {
     return forAllZipWith(.{}, gens, property);
 }
 
-/// Run a zipped property check with explicit config.
+/// Run a zipped property check with explicit config. Like `forAllZip` but
+/// accepts a `Config` for custom test count, seed, shrink limits, etc.
 pub fn forAllZipWith(config: Config, comptime gens: anytype, comptime property: anytype) !void {
     const combinators = @import("combinators.zig");
     const Tuple = combinators.ZipResult(gens);

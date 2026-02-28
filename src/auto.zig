@@ -258,18 +258,16 @@ fn unionGen(comptime T: type) Gen(T) {
                 // Shrink by trying earlier variants (void payload), then shrinking the payload.
                 const tag = @intFromEnum(std.meta.activeTag(value));
 
-                // Count: earlier void variants + payload shrinks
+                // Count earlier variants (both void and non-void) as shrink candidates.
                 var count: usize = 0;
                 inline for (fields) |field| {
                     if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
-                        if (field.type == void) count += 1;
+                        count += 1;
                     }
-
                 }
 
-                // For simplicity, just try earlier void variants
+                // No earlier variants — just shrink the current payload
                 if (count == 0) {
-                    // Try shrinking the payload of the current variant
                     return shrinkUnionPayload(T, value, allocator);
                 }
 
@@ -279,8 +277,11 @@ fn unionGen(comptime T: type) Gen(T) {
                     if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
                         if (field.type == void) {
                             candidates[pos] = @unionInit(T, field.name, {});
-                            pos += 1;
+                        } else {
+                            // Try zero/default value for non-void earlier variants
+                            candidates[pos] = @unionInit(T, field.name, std.mem.zeroes(field.type));
                         }
+                        pos += 1;
                     }
                 }
 
@@ -506,6 +507,29 @@ test "auto: tagged union shrinker produces candidates" {
     switch (first) {
         .empty => {},
         .value => return error.TestUnexpectedResult,
+    }
+}
+
+test "auto: union shrinker tries earlier non-void variants" {
+    const Action = union(enum) {
+        small: u8,
+        medium: u16,
+        large: u32,
+    };
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = auto(Action);
+    // Shrink .large(1000) — should try .small(0) and .medium(0) before payload shrinks
+    var si = g.shrink(Action{ .large = 1000 }, arena_state.allocator());
+    const first = si.next().?;
+    switch (first) {
+        .small => |v| try std.testing.expectEqual(@as(u8, 0), v),
+        .medium, .large => return error.TestUnexpectedResult,
+    }
+    const second = si.next().?;
+    switch (second) {
+        .medium => |v| try std.testing.expectEqual(@as(u16, 0), v),
+        .small, .large => return error.TestUnexpectedResult,
     }
 }
 
