@@ -1,9 +1,9 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-172%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-177_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-orange)](build.zig.zon)
+[![Version](https://img.shields.io/badge/version-0.5.1-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
@@ -211,7 +211,7 @@ Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/v0.5.0.tar.gz",
+        .url = "https://github.com/phiat/zigcheck/archive/v0.5.1.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
 },
@@ -260,6 +260,8 @@ my_tests.root_module.addImport("zigcheck", zigcheck_mod);
 
 Slice shrinking removes chunks (halves, quarters, eighths, ..., single elements), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed.
 
+> **`slice` vs `sliceOf`:** `slice(T, gen, max)` and `sliceRange(T, gen, min, max)` require an explicit element type. `sliceOf(gen, max)` and `sliceOfRange(gen, min, max)` infer it from the generator. Prefer `sliceOf`/`sliceOfRange` — they're shorter and less error-prone.
+
 **Tip:** Use `sliceOfRange(gen, 1, max)` when your property needs at least one element — `sliceOf(gen, max)` can shrink to empty, which may cause `for (1..s.len)` to overflow.
 
 ```zig
@@ -303,8 +305,8 @@ try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
 | `zip(gens)` | `Gen(Tuple)` | Combine generators into a tuple `Gen(struct { A, B, ... })` |
 | `arrayOf(T, gen, N)` | `Gen([N]T)` | Fixed-size array with per-element shrinking |
 | `zipMap(gens, R, fn)` | `Gen(R)` | Zip generators + map with splatted args |
-| `sliceOf(gen, max)` | `Gen([]const T)` | Like `slice` but infers element type |
-| `sliceOfRange(gen, min, max)` | `Gen([]const T)` | Like `sliceRange` but infers element type |
+| `sliceOf(gen, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `slice`) |
+| `sliceOfRange(gen, min, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `sliceRange`) |
 
 ```zig
 // Only test with positive even numbers
@@ -356,10 +358,10 @@ Use `assume()` to discard test cases that don't meet preconditions. The runner t
 test "division is inverse of multiplication" {
     try zigcheck.forAllZip(.{
         zigcheck.generators.int(i32),
-        zigcheck.generators.intRange(i32, 1, 1000),
+        zigcheck.generators.int(i32),
     }, struct {
         fn prop(a: i32, b: i32) !void {
-            try zigcheck.assume(b != 0); // skip division by zero
+            try zigcheck.assume(b != 0); // discard when b is zero
             const result = @divTrunc(a *% b, b);
             if (result != a) return error.PropertyFalsified;
         }
@@ -513,7 +515,7 @@ Consider an encoder/decoder. Both tools test it, but they ask different question
 ```zig
 // zigcheck: does encode→decode preserve the value? (logical correctness)
 test "roundtrip preserves data" {
-    try zigcheck.forAll(zigcheck.auto(User), struct {
+    try zigcheck.forAll(User, zigcheck.auto(User), struct {
         fn prop(user: User) !void {
             const bytes = try encode(user);
             const decoded = try decode(bytes);
@@ -524,9 +526,9 @@ test "roundtrip preserves data" {
 
 // fuzz: does decode survive arbitrary bytes? (robustness)
 test "decoder doesn't crash" {
-    try std.testing.fuzz(.{}, struct {
-        fn f(bytes: []const u8) void { _ = decode(bytes); }
-    }.f);
+    try std.testing.fuzz({}, struct {
+        fn f(_: anytype, bytes: []const u8) !void { _ = decode(bytes); }
+    }.f, .{});
 }
 ```
 
