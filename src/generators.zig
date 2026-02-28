@@ -30,17 +30,29 @@ pub fn int(comptime T: type) Gen(T) {
                 if (bits <= 8) return rng.int(T);
 
                 // Compute the bound: scale by size/100, minimum ±1
-                // Use wider arithmetic to avoid overflow
                 if (info.signedness == .signed) {
                     const max_val = std.math.maxInt(T);
-                    const Wide = std.meta.Int(.unsigned, bits);
-                    const bound_wide: Wide = @intCast(@max(1, @as(u128, @intCast(max_val)) * size / 100));
-                    const bound: T = @intCast(@min(bound_wide, @as(Wide, @intCast(max_val))));
-                    return rng.intRangeAtMost(T, -bound, bound);
+                    if (bits >= 128) {
+                        // Can't use wider arithmetic for 128-bit types.
+                        // Divide first to avoid overflow (minor precision loss is fine).
+                        const bound: T = @intCast(@max(1, @as(u128, @intCast(max_val)) / 100 * size));
+                        return rng.intRangeAtMost(T, -bound, bound);
+                    } else {
+                        const Wide = std.meta.Int(.unsigned, bits);
+                        const bound_wide: Wide = @intCast(@max(1, @as(u128, @intCast(max_val)) * size / 100));
+                        const bound: T = @intCast(@min(bound_wide, @as(Wide, @intCast(max_val))));
+                        return rng.intRangeAtMost(T, -bound, bound);
+                    }
                 } else {
                     const max_val = std.math.maxInt(T);
-                    const bound: T = @intCast(@min(@as(u128, @intCast(max_val)), @max(1, @as(u128, @intCast(max_val)) * size / 100)));
-                    return rng.intRangeAtMost(T, 0, bound);
+                    if (bits >= 128) {
+                        // Can't use wider arithmetic for 128-bit types.
+                        const bound: T = @intCast(@max(1, @as(u128, max_val) / 100 * size));
+                        return rng.intRangeAtMost(T, 0, bound);
+                    } else {
+                        const bound: T = @intCast(@min(@as(u128, @intCast(max_val)), @max(1, @as(u128, @intCast(max_val)) * size / 100)));
+                        return rng.intRangeAtMost(T, 0, bound);
+                    }
                 }
             }
         }.f,
@@ -316,6 +328,24 @@ test "int generator produces values" {
     }
     try std.testing.expect(seen_positive);
     try std.testing.expect(seen_negative);
+}
+
+test "int: u128 does not overflow" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = int(u128);
+    for (0..100) |i| {
+        const v = g.generate(prng.random(), std.testing.allocator, i);
+        _ = v; // just verify no panic
+    }
+}
+
+test "int: i128 does not overflow" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = int(i128);
+    for (0..100) |i| {
+        const v = g.generate(prng.random(), std.testing.allocator, i);
+        _ = v; // just verify no panic
+    }
 }
 
 test "intRange: produces values in [10, 20]" {
