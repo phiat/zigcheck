@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-178_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-184_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.5.3-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -392,6 +392,8 @@ try zigcheck.forAllLabeled(i32, zigcheck.generators.int(i32),
 // Prints: 50.2% positive, 49.7% negative, 0.1% zero
 ```
 
+Coverage requirements (`forAllCover` and `PropertyContext.cover`) use **Wilson score confidence intervals** to avoid spurious failures. A label only fails when the upper bound of the confidence interval is below the required percentage, meaning the library is statistically confident the true proportion is insufficient. The confidence level defaults to 0.95 and can be set via `Config.confidence`.
+
 ## Configuration
 
 ```zig
@@ -403,10 +405,11 @@ try zigcheck.forAllWith(.{
     .verbose = true,          // default: false
     .verbose_shrink = true,   // default: false
     .max_size = 200,          // default: 100
+    .confidence = 0.99,       // default: 0.95
 }, i32, gen, property);
 ```
 
-Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up.
+Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up. Use `.confidence` to set the confidence level for coverage checks (see below).
 
 Config supports builder methods for per-property overrides (QuickCheck's `withMaxSuccess`, `withMaxShrinks`, etc.):
 
@@ -455,7 +458,7 @@ Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)`
 | `forAllLabeled(T, gen, property, classifier)` | Collect coverage statistics |
 | `forAllLabeledWith(config, T, gen, property, classifier)` | Labeled check with explicit config |
 | `checkLabeled(config, T, gen, property, classifier, alloc)` | Return `CheckResultLabeled` without failing |
-| `forAllCover(config, T, gen, prop, classifier, reqs)` | Labeled check with minimum coverage requirements |
+| `forAllCover(config, T, gen, prop, classifier, reqs)` | Labeled check with minimum coverage requirements (Wilson score) |
 | `forAllCollect(config, T, gen, property)` | Auto-label with stringified value (QuickCheck `collect`) |
 | `forAllTabulate(config, T, gen, prop, table, classifier)` | Group labels under a named table (QuickCheck `tabulate`) |
 | `conjoin(config, T, gen, properties)` | All properties must hold (`.&&.`) |

@@ -96,6 +96,12 @@ pub const Config = struct {
     /// bound of the size ramp (0 to max_size across the test run).
     /// QuickCheck default is 100.
     max_size: usize = 100,
+    /// Confidence level for coverage checks (0.0–1.0). Coverage
+    /// requirements use a Wilson score confidence interval: a label
+    /// only fails when the upper bound of the interval is below the
+    /// required percentage, meaning we are statistically confident
+    /// that the true proportion is insufficient. Default 0.95.
+    confidence: f64 = 0.95,
 
     /// Override the number of test cases. QuickCheck: `withMaxSuccess`.
     pub fn withNumTests(self: Config, n: usize) Config {
@@ -137,6 +143,14 @@ pub const Config = struct {
         var c = self;
         c.max_size = n;
         return c;
+    }
+
+    /// Set the confidence level for coverage checks (0.0–1.0).
+    /// QuickCheck: `withConfidence`. Default 0.95 (z ≈ 1.96).
+    pub fn withConfidence(self: Config, c: f64) Config {
+        var cfg = self;
+        cfg.confidence = c;
+        return cfg;
     }
 };
 
@@ -504,6 +518,47 @@ fn doShrink(
     return .{ .value = best, .steps = steps };
 }
 
+// -- Wilson score confidence interval for coverage checks ------------------
+
+/// Convert a confidence level (e.g. 0.95) to the corresponding z-score
+/// using a rational approximation of the inverse normal CDF (Abramowitz
+/// and Stegun 26.2.23). Accurate to ~4.5e-4 for 0.5 < confidence < 1.0.
+fn confidenceToZ(confidence: f64) f64 {
+    // We need the z such that P(Z ≤ z) = (1 + confidence) / 2.
+    // Equivalently, the inverse normal of p = (1 + confidence) / 2.
+    const p = (1.0 + confidence) / 2.0;
+    if (p <= 0.5 or p >= 1.0) return 1.96; // fallback for out-of-range
+
+    // Abramowitz & Stegun rational approximation for the inverse normal
+    // using the substitution t = sqrt(-2 * ln(1 - p)).
+    const t = @sqrt(-2.0 * @log(1.0 - p));
+    const c0 = 2.515517;
+    const c1 = 0.802853;
+    const c2 = 0.010328;
+    const d1 = 1.432788;
+    const d2 = 0.189269;
+    const d3 = 0.001308;
+    return t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
+}
+
+/// Compute the Wilson score interval upper bound for a proportion.
+///
+/// Given `successes` out of `n` trials and a z-score, returns the upper
+/// bound of the confidence interval for the true proportion (as a
+/// percentage 0–100). This is used by coverage checks: a label fails
+/// only when the upper bound is below the required percentage, meaning
+/// we are statistically confident the true proportion is too low.
+fn wilsonUpperBound(successes: usize, n: usize, z: f64) f64 {
+    if (n == 0) return 0.0;
+    const n_f = @as(f64, @floatFromInt(n));
+    const p_hat = @as(f64, @floatFromInt(successes)) / n_f;
+    const z2 = z * z;
+    const denom = 1.0 + z2 / n_f;
+    const center = p_hat + z2 / (2.0 * n_f);
+    const spread = z * @sqrt(p_hat * (1.0 - p_hat) / n_f + z2 / (4.0 * n_f * n_f));
+    return (center + spread) / denom * 100.0;
+}
+
 // -- Labeled / coverage properties ----------------------------------------
 
 /// Coverage statistics collected during a labeled property check.
@@ -694,8 +749,9 @@ pub const CoverageRequirement = struct {
 };
 
 /// Run a property check with minimum coverage requirements.
-/// Similar to QuickCheck's `cover`: after all tests pass, verifies that each
-/// label meets its minimum percentage threshold.
+/// Uses Wilson score confidence intervals (like QuickCheck's `checkCoverage`)
+/// to avoid spurious failures: a label only fails when the upper bound of
+/// the confidence interval is below the required percentage.
 ///
 /// ```zig
 /// try zigcheck.forAllCover(.{}, i32, gen, property, classifier, &.{
@@ -717,22 +773,25 @@ pub fn forAllCover(
     const result = checkLabeled(config, T, gen, property, classifier, label_arena.allocator());
     switch (result) {
         .passed => |p| {
-            // Check coverage requirements
+            // Check coverage requirements using Wilson score confidence interval.
+            const z = confidenceToZ(config.confidence);
             for (requirements) |req| {
                 var found = false;
                 for (p.label_names, p.label_counts) |name, count| {
                     if (std.mem.eql(u8, name, req.label)) {
-                        const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
-                        if (pct < req.min_pct) {
+                        const upper = wilsonUpperBound(count, p.num_tests, z);
+                        if (upper < req.min_pct) {
+                            const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(p.num_tests)) * 100.0;
                             std.log.warn(
                                 \\
                                 \\--- zigcheck: INSUFFICIENT COVERAGE -----------------------
                                 \\
                                 \\  Label "{s}": {d:.1}% (required: {d:.1}%)
+                                \\  Wilson upper bound: {d:.1}% at {d:.0}% confidence
                                 \\  {d} of {d} tests
                                 \\
                                 \\------------------------------------------------------
-                            , .{ req.label, pct, req.min_pct, count, p.num_tests });
+                            , .{ req.label, pct, req.min_pct, upper, config.confidence * 100.0, count, p.num_tests });
                             return error.InsufficientCoverage;
                         }
                         found = true;
@@ -740,16 +799,20 @@ pub fn forAllCover(
                     }
                 }
                 if (!found) {
-                    std.log.warn(
-                        \\
-                        \\--- zigcheck: INSUFFICIENT COVERAGE -----------------------
-                        \\
-                        \\  Label "{s}": 0.0% (required: {d:.1}%)
-                        \\  No test cases matched this label.
-                        \\
-                        \\------------------------------------------------------
-                    , .{ req.label, req.min_pct });
-                    return error.InsufficientCoverage;
+                    const upper = wilsonUpperBound(0, p.num_tests, z);
+                    if (upper < req.min_pct) {
+                        std.log.warn(
+                            \\
+                            \\--- zigcheck: INSUFFICIENT COVERAGE -----------------------
+                            \\
+                            \\  Label "{s}": 0.0% (required: {d:.1}%)
+                            \\  Wilson upper bound: {d:.1}% at {d:.0}% confidence
+                            \\  No test cases matched this label.
+                            \\
+                            \\------------------------------------------------------
+                        , .{ req.label, req.min_pct, upper, config.confidence * 100.0 });
+                        return error.InsufficientCoverage;
+                    }
                 }
             }
             // Print coverage report
@@ -1012,18 +1075,23 @@ pub const PropertyContext = struct {
         entry.value_ptr.* += 1;
     }
 
-    /// Check coverage requirements. Returns an error message if any requirement is not met.
-    fn checkCoverage(self: *PropertyContext) ?[]const u8 {
+    /// Check coverage requirements using Wilson score confidence intervals.
+    /// Only fails when the upper bound of the interval is below the
+    /// required percentage. Returns an error message if any requirement
+    /// is confidently unmet.
+    fn checkCoverage(self: *PropertyContext, confidence: f64) ?[]const u8 {
         if (self.num_tests_so_far == 0) return null;
+        const z = confidenceToZ(confidence);
         var iter = self.cover_reqs.iterator();
         while (iter.next()) |req| {
             const count = self.label_map.get(req.key_ptr.*) orelse 0;
-            const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(self.num_tests_so_far)) * 100.0;
-            if (pct < req.value_ptr.*) {
+            const upper = wilsonUpperBound(count, self.num_tests_so_far, z);
+            if (upper < req.value_ptr.*) {
+                const pct = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(self.num_tests_so_far)) * 100.0;
                 return std.fmt.allocPrint(
                     self.alloc,
-                    "Insufficient coverage for \"{s}\": {d:.1}% (need {d:.1}%)",
-                    .{ req.key_ptr.*, pct, req.value_ptr.* },
+                    "Insufficient coverage for \"{s}\": {d:.1}% (need {d:.1}%, Wilson upper: {d:.1}%)",
+                    .{ req.key_ptr.*, pct, req.value_ptr.*, upper },
                 ) catch return req.key_ptr.*;
             }
         }
@@ -1123,7 +1191,7 @@ pub fn forAllCtxWith(
     }
 
     // Check coverage requirements
-    if (ctx.checkCoverage()) |msg| {
+    if (ctx.checkCoverage(config.confidence)) |msg| {
         std.log.info("zigcheck: insufficient coverage: {s}", .{msg});
         return error.InsufficientCoverage;
     }
@@ -1797,4 +1865,64 @@ test "within: fast property passes" {
         .passed => {},
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "Wilson score: upper bound above proportion" {
+    // Wilson upper bound should always be >= the raw proportion
+    const z = confidenceToZ(0.95);
+    const upper = wilsonUpperBound(30, 100, z);
+    try std.testing.expect(upper >= 30.0); // must be >= raw 30%
+    try std.testing.expect(upper < 50.0); // but not wildly high
+}
+
+test "Wilson score: zero successes gives nonzero upper bound" {
+    // Even 0 successes should have a positive upper bound (can't be
+    // confident the true rate is 0 from finite samples).
+    const z = confidenceToZ(0.95);
+    const upper = wilsonUpperBound(0, 100, z);
+    try std.testing.expect(upper > 0.0);
+    try std.testing.expect(upper < 5.0); // but small with 100 trials
+}
+
+test "Wilson score: all successes gives upper bound near 100" {
+    const z = confidenceToZ(0.95);
+    const upper = wilsonUpperBound(100, 100, z);
+    try std.testing.expect(upper > 95.0);
+    try std.testing.expect(upper <= 100.0);
+}
+
+test "cover: borderline coverage passes with Wilson score" {
+    // A label at exactly ~30% should pass a 30% requirement because the
+    // Wilson upper bound exceeds 30%. With raw percentage this could be
+    // flaky; with Wilson it's robust.
+    try forAllCover(.{ .seed = 42, .num_tests = 100 }, i32, generators.int(i32), struct {
+        fn prop(_: i32) !void {}
+    }.prop, struct {
+        fn classify(n: i32) []const []const u8 {
+            if (n > 0) return &.{"positive"};
+            if (n < 0) return &.{"negative"};
+            return &.{"zero"};
+        }
+    }.classify, &.{
+        .{ .label = "positive", .min_pct = 30.0 },
+        .{ .label = "negative", .min_pct = 30.0 },
+    });
+}
+
+test "confidenceToZ: known values" {
+    // z for 95% confidence should be ~1.96
+    const z95 = confidenceToZ(0.95);
+    try std.testing.expect(@abs(z95 - 1.96) < 0.01);
+    // z for 99% confidence should be ~2.576
+    const z99 = confidenceToZ(0.99);
+    try std.testing.expect(@abs(z99 - 2.576) < 0.02);
+    // z for 90% should be ~1.645
+    const z90 = confidenceToZ(0.90);
+    try std.testing.expect(@abs(z90 - 1.645) < 0.01);
+}
+
+test "Config.withConfidence" {
+    const base = Config{};
+    const c = base.withConfidence(0.99);
+    try std.testing.expect(@abs(c.confidence - 0.99) < 0.001);
 }
