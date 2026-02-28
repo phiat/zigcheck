@@ -960,7 +960,14 @@ pub const PropertyContext = struct {
     /// Add a label to the current test case (like QuickCheck's `label`).
     pub fn label(self: *PropertyContext, name: []const u8) void {
         const entry = self.label_map.getOrPut(name) catch return;
-        if (!entry.found_existing) entry.value_ptr.* = 0;
+        if (!entry.found_existing) {
+            // Dupe the key so it survives gen_arena resets between iterations.
+            entry.key_ptr.* = self.alloc.dupe(u8, name) catch {
+                _ = self.label_map.remove(name);
+                return;
+            };
+            entry.value_ptr.* = 0;
+        }
         entry.value_ptr.* += 1;
     }
 
@@ -972,17 +979,28 @@ pub const PropertyContext = struct {
     /// Register a minimum coverage requirement for a label.
     /// If the label's actual coverage falls below `min_pct`, the test fails.
     pub fn cover(self: *PropertyContext, name: []const u8, min_pct: f64) void {
-        self.cover_reqs.put(name, min_pct) catch return;
+        const duped = self.alloc.dupe(u8, name) catch return;
+        self.cover_reqs.put(duped, min_pct) catch return;
     }
 
     /// Add a label under a named table (like QuickCheck's `tabulate`).
     pub fn tabulate(self: *PropertyContext, table_name: []const u8, name: []const u8) void {
         const table_entry = self.tables.getOrPut(table_name) catch return;
         if (!table_entry.found_existing) {
+            table_entry.key_ptr.* = self.alloc.dupe(u8, table_name) catch {
+                _ = self.tables.remove(table_name);
+                return;
+            };
             table_entry.value_ptr.* = std.StringHashMap(usize).init(self.alloc);
         }
         const entry = table_entry.value_ptr.getOrPut(name) catch return;
-        if (!entry.found_existing) entry.value_ptr.* = 0;
+        if (!entry.found_existing) {
+            entry.key_ptr.* = self.alloc.dupe(u8, name) catch {
+                _ = table_entry.value_ptr.remove(name);
+                return;
+            };
+            entry.value_ptr.* = 0;
+        }
         entry.value_ptr.* += 1;
     }
 

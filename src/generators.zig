@@ -108,8 +108,21 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
                         // Compute midpoint safely for both signed and unsigned.
                         // For signed types, (hi - lo) can overflow the type, so
                         // we widen to a larger integer for the arithmetic.
+                        // For 128-bit types we can't widen (no i129), so we use
+                        // unsigned arithmetic directly.
                         const mid = blk: {
                             const bits = @typeInfo(T).int.bits;
+                            if (bits >= 128) {
+                                // Use unsigned distance to avoid needing i129.
+                                const Unsigned = std.meta.Int(.unsigned, bits);
+                                const lo_u: Unsigned = @bitCast(self.lo);
+                                const hi_u: Unsigned = @bitCast(self.hi);
+                                // lo <= hi in the value domain, but after bitcast
+                                // for signed types the unsigned order may differ.
+                                // Use wrapping subtraction + halving.
+                                const dist = hi_u -% lo_u;
+                                break :blk @as(T, @bitCast(lo_u +% (dist / 2)));
+                            }
                             const Wide = std.meta.Int(.signed, bits + 1);
                             const lo_wide: Wide = self.lo;
                             const hi_wide: Wide = self.hi;
@@ -230,15 +243,19 @@ pub fn nonNegative(comptime T: type) Gen(T) {
 
 /// Generator for non-zero integers (!= 0).
 /// Produces any value in the full range except zero.
+/// Uses intRange directly (not filter) so it never exhausts at size=0.
 pub fn nonZero(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .int) @compileError("nonZero() requires an integer type, got " ++ @typeName(T));
     }
-    return combinators_mod.filter(T, int(T), struct {
-        fn pred(n: T) bool {
-            return n != 0;
-        }
-    }.pred);
+    if (@typeInfo(T).int.signedness == .signed) {
+        return combinators_mod.oneOf(T, &.{
+            intRange(T, 1, std.math.maxInt(T)),
+            intRange(T, std.math.minInt(T), -1),
+        });
+    } else {
+        return intRange(T, 1, std.math.maxInt(T));
+    }
 }
 
 /// Generator for strictly negative integers (< 0). Signed types only.
@@ -541,6 +558,41 @@ test "int: small size produces small values" {
     for (0..200) |_| {
         const v = g.generate(prng.random(), std.testing.allocator, 10);
         try std.testing.expect(v >= -bound and v <= bound);
+    }
+}
+
+test "intRange u128: shrinker doesn't overflow" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(u128, 10, 1000);
+    var si = g.shrink(500, arena_state.allocator());
+    var count: usize = 0;
+    while (si.next()) |v| {
+        try std.testing.expect(v >= 10 and v <= 500);
+        count += 1;
+    }
+    try std.testing.expect(count > 0);
+}
+
+test "intRange i128: shrinker doesn't overflow" {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const g = intRange(i128, -1000, 1000);
+    var si = g.shrink(500, arena_state.allocator());
+    var count: usize = 0;
+    while (si.next()) |v| {
+        try std.testing.expect(v >= -1000 and v <= 500);
+        count += 1;
+    }
+    try std.testing.expect(count > 0);
+}
+
+test "nonZero: never returns zero even at size 0" {
+    var prng = std.Random.DefaultPrng.init(42);
+    const g = nonZero(i32);
+    for (0..200) |_| {
+        const v = g.generate(prng.random(), std.testing.allocator, 0);
+        try std.testing.expect(v != 0);
     }
 }
 

@@ -178,12 +178,10 @@ pub fn filter(
                     const val = inner.generate(rng, allocator, size);
                     if (pred(val)) return val;
                 }
-                // Log a diagnostic rather than panicking so the test runner can
-                // report the seed and continue with other tests.
-                std.log.info("zigcheck.filter: predicate rejected {d} consecutive values; predicate may be too restrictive", .{max_retries});
-                // Return the last generated value even though it doesn't pass the
-                // predicate. This lets the runner proceed (the property will likely
-                // fail, and the seed will be reported).
+                std.log.warn("zigcheck.filter: predicate rejected {d} consecutive values; predicate may be too restrictive. Consider using assume() instead.", .{max_retries});
+                // Last attempt — return it whether or not it passes.
+                // The property will likely fail, and the runner will report
+                // the seed so the user can diagnose.
                 return inner.generate(rng, allocator, size);
             }
         }.gen,
