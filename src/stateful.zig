@@ -10,6 +10,7 @@
 const std = @import("std");
 const Gen = @import("gen.zig").Gen;
 const ShrinkIter = @import("shrink.zig").ShrinkIter;
+const auto_mod = @import("auto.zig");
 
 /// Configuration for stateful tests.
 pub const StatefulConfig = struct {
@@ -119,7 +120,7 @@ pub fn StateMachine(
         }
 
         fn checkInternal(config: StatefulConfig, callbacks: Callbacks, alloc: std.mem.Allocator) Result {
-            const seed = config.seed orelse @as(u64, @intCast(@as(u128, @bitCast(std.time.nanoTimestamp())) & 0xFFFFFFFFFFFFFFFF));
+            const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
             var prng = std.Random.DefaultPrng.init(seed);
             const rng = prng.random();
 
@@ -172,7 +173,7 @@ pub fn StateMachine(
             verbose: bool,
         ) ?usize {
             var model = callbacks.init_model();
-            const sut = callbacks.init_sut(alloc) catch return 0;
+            const sut = callbacks.init_sut(alloc) catch return null;
             defer if (callbacks.cleanup_sut) |cleanup| cleanup(sut);
 
             for (sequence, 0..) |cmd, i| {
@@ -234,7 +235,7 @@ pub fn StateMachine(
             // Phase 2: Shrink individual command payloads.
             // For each command, try shrink candidates from auto(Cmd) and keep
             // the simplest version that still triggers the failure.
-            const cmd_gen = @import("auto.zig").auto(Cmd);
+            const cmd_gen = auto_mod.auto(Cmd);
             var improved = true;
             while (improved and steps < config.max_shrinks) {
                 improved = false;
@@ -252,7 +253,7 @@ pub fn StateMachine(
                         {
                             best = candidate;
                             improved = true;
-                            break; // restart shrinking this position with the new value
+                            break; // improved — outer loop will restart from position 0
                         }
                     }
                 }

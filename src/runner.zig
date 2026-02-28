@@ -981,8 +981,14 @@ pub const PropertyContext = struct {
     /// Register a minimum coverage requirement for a label.
     /// If the label's actual coverage falls below `min_pct`, the test fails.
     pub fn cover(self: *PropertyContext, name: []const u8, min_pct: f64) void {
-        const duped = self.alloc.dupe(u8, name) catch return;
-        self.cover_reqs.put(duped, min_pct) catch return;
+        const entry = self.cover_reqs.getOrPut(name) catch return;
+        if (!entry.found_existing) {
+            entry.key_ptr.* = self.alloc.dupe(u8, name) catch {
+                _ = self.cover_reqs.remove(name);
+                return;
+            };
+        }
+        entry.value_ptr.* = min_pct;
     }
 
     /// Add a label under a named table (like QuickCheck's `tabulate`).

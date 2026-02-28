@@ -255,13 +255,22 @@ fn unionGen(comptime T: type) Gen(T) {
         }.gen,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                // Shrink by trying earlier variants (void payload), then shrinking the payload.
-                const tag = @intFromEnum(std.meta.activeTag(value));
+                // Shrink by trying variants with earlier declaration index, then shrinking the payload.
+                // Use declaration index (not tag integer value) so shrinking order matches
+                // the source-level field order, consistent with enumGen's shrinker.
+                //
+                // Find the declaration index of the active variant at runtime.
+                var current_idx: usize = fields.len;
+                inline for (fields, 0..) |field, i| {
+                    if (std.meta.activeTag(value) == @field(info.tag_type.?, field.name)) {
+                        current_idx = i;
+                    }
+                }
 
-                // Count earlier variants (both void and non-void) as shrink candidates.
+                // Count earlier variants (by declaration order) as shrink candidates.
                 var count: usize = 0;
-                inline for (fields) |field| {
-                    if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
+                inline for (fields, 0..) |_, i| {
+                    if (i < current_idx) {
                         count += 1;
                     }
                 }
@@ -273,8 +282,8 @@ fn unionGen(comptime T: type) Gen(T) {
 
                 const candidates = allocator.alloc(T, count) catch return ShrinkIter(T).empty();
                 var pos: usize = 0;
-                inline for (fields) |field| {
-                    if (@as(usize, @intCast(@intFromEnum(@field(info.tag_type.?, field.name)))) < tag) {
+                inline for (fields, 0..) |field, i| {
+                    if (i < current_idx) {
                         if (field.type == void) {
                             candidates[pos] = @unionInit(T, field.name, {});
                         } else {
