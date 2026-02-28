@@ -99,44 +99,13 @@ pub fn oneOf(comptime T: type, comptime gens: []const Gen(T)) Gen(T) {
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
                 // We don't know which generator produced the value, so try
-                // all generators' shrinkers in round-robin order. This gives
-                // each shrinker a fair share of the shrink budget rather than
-                // exhausting one before trying the next.
+                // all generators' shrinkers sequentially. Each shrinker is
+                // fully exhausted before moving to the next.
                 const iters = allocator.alloc(ShrinkIter(T), gens.len) catch return ShrinkIter(T).empty();
                 inline for (gens, 0..) |g, i| {
                     iters[i] = g.shrink(value, allocator);
                 }
-
-                const State = struct {
-                    iters_arr: []ShrinkIter(T),
-                    pos: usize,
-                    exhausted: usize,
-                };
-                const state = allocator.create(State) catch {
-                    allocator.free(iters);
-                    return ShrinkIter(T).empty();
-                };
-                state.* = .{ .iters_arr = iters, .pos = 0, .exhausted = 0 };
-
-                return .{
-                    .context = @ptrCast(state),
-                    .nextFn = struct {
-                        fn next(ctx: *anyopaque) ?T {
-                            const s: *State = @ptrCast(@alignCast(ctx));
-                            // Round-robin across shrinkers
-                            var tried: usize = 0;
-                            while (tried < s.iters_arr.len) {
-                                const idx = s.pos % s.iters_arr.len;
-                                s.pos += 1;
-                                if (s.iters_arr[idx].next()) |val| {
-                                    return val;
-                                }
-                                tried += 1;
-                            }
-                            return null;
-                        }
-                    }.next,
-                };
+                return shrink.chainIters(T, iters, allocator);
             }
         }.f,
     };
@@ -269,40 +238,12 @@ pub fn frequency(comptime T: type, comptime weighted: []const struct { usize, Ge
         .shrinkFn = struct {
             fn shrinkFn(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
                 // We don't know which generator produced the value, so try
-                // all generators' shrinkers in round-robin order.
+                // all generators' shrinkers sequentially.
                 const iters = allocator.alloc(ShrinkIter(T), weighted.len) catch return ShrinkIter(T).empty();
                 inline for (weighted, 0..) |entry, i| {
                     iters[i] = entry[1].shrink(value, allocator);
                 }
-
-                const State = struct {
-                    iters_arr: []ShrinkIter(T),
-                    pos: usize,
-                };
-                const state = allocator.create(State) catch {
-                    allocator.free(iters);
-                    return ShrinkIter(T).empty();
-                };
-                state.* = .{ .iters_arr = iters, .pos = 0 };
-
-                return .{
-                    .context = @ptrCast(state),
-                    .nextFn = struct {
-                        fn next(ctx: *anyopaque) ?T {
-                            const s: *State = @ptrCast(@alignCast(ctx));
-                            var tried: usize = 0;
-                            while (tried < s.iters_arr.len) {
-                                const idx = s.pos % s.iters_arr.len;
-                                s.pos += 1;
-                                if (s.iters_arr[idx].next()) |val| {
-                                    return val;
-                                }
-                                tried += 1;
-                            }
-                            return null;
-                        }
-                    }.next,
-                };
+                return shrink.chainIters(T, iters, allocator);
             }
         }.shrinkFn,
     };
@@ -716,28 +657,7 @@ pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
                     };
                 }
 
-                const ChainState = struct {
-                    iters_arr: []ShrinkIter(T),
-                    pos: usize,
-
-                    fn nextChain(ctx: *anyopaque) ?T {
-                        const self: *@This() = @ptrCast(@alignCast(ctx));
-                        while (self.pos < self.iters_arr.len) {
-                            if (self.iters_arr[self.pos].next()) |val| {
-                                return val;
-                            }
-                            self.pos += 1;
-                        }
-                        return null;
-                    }
-                };
-                const chain = allocator.create(ChainState) catch return ShrinkIter(T).empty();
-                chain.* = .{ .iters_arr = iters, .pos = 0 };
-
-                return .{
-                    .context = @ptrCast(chain),
-                    .nextFn = ChainState.nextChain,
-                };
+                return shrink.chainIters(T, iters, allocator);
             }
         }.f,
     };
@@ -811,28 +731,7 @@ pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
                     };
                 }
 
-                const ChainState = struct {
-                    iters_arr: []ShrinkIter(R),
-                    pos: usize,
-
-                    fn nextChain(ctx: *anyopaque) ?R {
-                        const self: *@This() = @ptrCast(@alignCast(ctx));
-                        while (self.pos < self.iters_arr.len) {
-                            if (self.iters_arr[self.pos].next()) |val| {
-                                return val;
-                            }
-                            self.pos += 1;
-                        }
-                        return null;
-                    }
-                };
-                const chain = allocator.create(ChainState) catch return ShrinkIter(R).empty();
-                chain.* = .{ .iters_arr = iters, .pos = 0 };
-
-                return .{
-                    .context = @ptrCast(chain),
-                    .nextFn = ChainState.nextChain,
-                };
+                return shrink.chainIters(R, iters, allocator);
             }
         }.f,
     };
@@ -993,28 +892,7 @@ pub fn arrayOf(
                     };
                 }
 
-                const ChainState = struct {
-                    iters_arr: []ShrinkIter([N]T),
-                    pos: usize,
-
-                    fn nextChain(ctx: *anyopaque) ?[N]T {
-                        const self: *@This() = @ptrCast(@alignCast(ctx));
-                        while (self.pos < self.iters_arr.len) {
-                            if (self.iters_arr[self.pos].next()) |val| {
-                                return val;
-                            }
-                            self.pos += 1;
-                        }
-                        return null;
-                    }
-                };
-                const chain = allocator.create(ChainState) catch return ShrinkIter([N]T).empty();
-                chain.* = .{ .iters_arr = iters, .pos = 0 };
-
-                return .{
-                    .context = @ptrCast(chain),
-                    .nextFn = ChainState.nextChain,
-                };
+                return shrink.chainIters([N]T, iters, allocator);
             }
         }.f,
     };

@@ -1080,14 +1080,14 @@ pub fn forAllCtxWith(
                 discards += 1;
                 continue;
             }
-            // Shrink using a wrapper that ignores the context.
-            // The dummy context uses a fixed buffer — its allocations are
-            // discarded each call, so overflow is harmless (silently drops labels).
+            // Shrink using a wrapper that provides a fresh PropertyContext
+            // per shrink candidate. The arena is reset each call so label/cover
+            // state does not accumulate.
             const shrunk = doShrink(T, gen, struct {
                 fn wrapper(v: T) anyerror!void {
-                    var buf: [4096]u8 = undefined;
-                    var fba = std.heap.FixedBufferAllocator.init(&buf);
-                    var dummy_ctx = PropertyContext.init(fba.allocator());
+                    var shrink_ctx_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                    defer shrink_ctx_arena.deinit();
+                    var dummy_ctx = PropertyContext.init(shrink_ctx_arena.allocator());
                     return property(v, &dummy_ctx);
                 }
             }.wrapper, value, config.max_shrinks, config.verbose_shrink);

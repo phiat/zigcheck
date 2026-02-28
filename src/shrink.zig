@@ -33,6 +33,33 @@ pub fn ShrinkIter(comptime T: type) type {
     };
 }
 
+/// Chain multiple ShrinkIter(T) sequentially into a single ShrinkIter(T).
+/// Exhausts each iterator in order before moving to the next.
+/// Used by build, zip, arrayOf, oneOf, frequency, and auto structGen.
+pub fn chainIters(comptime T: type, iters: []ShrinkIter(T), allocator: std.mem.Allocator) ShrinkIter(T) {
+    const State = struct {
+        iters_arr: []ShrinkIter(T),
+        pos: usize,
+
+        fn nextChain(ctx: *anyopaque) ?T {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            while (self.pos < self.iters_arr.len) {
+                if (self.iters_arr[self.pos].next()) |val| {
+                    return val;
+                }
+                self.pos += 1;
+            }
+            return null;
+        }
+    };
+    const state = allocator.create(State) catch return ShrinkIter(T).empty();
+    state.* = .{ .iters_arr = iters, .pos = 0 };
+    return .{
+        .context = @ptrCast(state),
+        .nextFn = State.nextChain,
+    };
+}
+
 // -- Integer shrinking ----------------------------------------------------
 
 /// State for binary-search-toward-zero shrinking of integers.

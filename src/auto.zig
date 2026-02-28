@@ -166,29 +166,7 @@ fn structGen(comptime T: type) Gen(T) {
                     };
                 }
 
-                // Chain state: iterate through the array of ShrinkIter(T)
-                const ChainState = struct {
-                    iters_arr: []ShrinkIter(T),
-                    pos: usize,
-
-                    fn nextChain(ctx: *anyopaque) ?T {
-                        const self: *@This() = @ptrCast(@alignCast(ctx));
-                        while (self.pos < self.iters_arr.len) {
-                            if (self.iters_arr[self.pos].next()) |val| {
-                                return val;
-                            }
-                            self.pos += 1;
-                        }
-                        return null;
-                    }
-                };
-                const chain = allocator.create(ChainState) catch return ShrinkIter(T).empty();
-                chain.* = .{ .iters_arr = iters, .pos = 0 };
-
-                return .{
-                    .context = @ptrCast(chain),
-                    .nextFn = ChainState.nextChain,
-                };
+                return shrink.chainIters(T, iters, allocator);
             }
         }.f,
     };

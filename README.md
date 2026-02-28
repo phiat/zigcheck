@@ -3,7 +3,7 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
 [![Tests](https://img.shields.io/badge/tests-172%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-orange)](build.zig.zon)
+[![Version](https://img.shields.io/badge/version-0.5.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
@@ -211,7 +211,7 @@ Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/v0.4.0.tar.gz",
+        .url = "https://github.com/phiat/zigcheck/archive/v0.5.0.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
 },
@@ -563,7 +563,7 @@ src/
   combinators.zig    # Combinators (constant, element, oneOf, map, filter, etc.)
   collections.zig    # Slice, string, unicode, shuffle, sublist, ordered list
   auto.zig           # Auto-derivation (enum, struct, optional, union)
-  shrink.zig         # ShrinkIter(T) and shrink state types
+  shrink.zig         # ShrinkIter(T), shrink state types, chainIters helper
   runner.zig         # forAll/check engine with shrink loop
   fuzz.zig           # Fuzz integration (FuzzRandom adapter, fromFuzzInput)
   stateful.zig       # State machine testing (commands, model, postconditions)
