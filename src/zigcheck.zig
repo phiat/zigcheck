@@ -55,67 +55,62 @@ pub const FuzzCheckResult = runner.FuzzCheckResult;
 pub const checkFuzzOne = runner.checkFuzzOne;
 pub const forAllFuzzOne = runner.forAllFuzzOne;
 
-// -- Convenience re-exports -----------------------------------------------
+// -- Auto-derivation ------------------------------------------------------
 
-/// Auto-derive a generator for any supported type via comptime reflection.
-pub const auto = generators.auto;
+pub const auto = @import("auto.zig").auto;
 
-// -- Slice and string generators ------------------------------------------
+// -- Combinators (from combinators.zig) -----------------------------------
 
-pub const slice = generators.slice;
-pub const sliceRange = generators.sliceRange;
-pub const asciiChar = generators.asciiChar;
-pub const asciiString = generators.asciiString;
-pub const asciiStringRange = generators.asciiStringRange;
-pub const alphanumeric = generators.alphanumeric;
-pub const alphanumericString = generators.alphanumericString;
-pub const string = generators.string;
+const combinators = @import("combinators.zig");
+pub const constant = combinators.constant;
+pub const element = combinators.element;
+pub const oneOf = combinators.oneOf;
+pub const frequency = combinators.frequency;
+pub const map = combinators.map;
+pub const mapAlloc = combinators.mapAlloc;
+pub const filter = combinators.filter;
+pub const FilterExhausted = combinators.FilterExhausted;
+pub const noShrink = combinators.noShrink;
+pub const shrinkMap = combinators.shrinkMap;
+pub const shrinkMapAlloc = combinators.shrinkMapAlloc;
+pub const flatMap = combinators.flatMap;
+pub const sized = combinators.sized;
+pub const resize = combinators.resize;
+pub const scale = combinators.scale;
+pub const mapSize = combinators.mapSize;
+pub const suchThatMap = combinators.suchThatMap;
+pub const FunWith = combinators.FunWith;
+pub const funGen = combinators.funGen;
+pub const build = combinators.build;
+pub const zip = combinators.zip;
+pub const ZipResult = combinators.ZipResult;
+pub const GenType = combinators.GenType;
+pub const zipMap = combinators.zipMap;
+pub const sliceOf = combinators.sliceOf;
+pub const sliceOfRange = combinators.sliceOfRange;
+pub const arrayOf = combinators.arrayOf;
 
-// -- Combinators ----------------------------------------------------------
+// -- Collections and strings (from collections.zig) -----------------------
 
-pub const constant = generators.constant;
-pub const element = generators.element;
-pub const oneOf = generators.oneOf;
-pub const frequency = generators.frequency;
-pub const map = generators.map;
-pub const mapAlloc = generators.mapAlloc;
-pub const filter = generators.filter;
-pub const FilterExhausted = generators.FilterExhausted;
-pub const noShrink = generators.noShrink;
-pub const shrinkMap = generators.shrinkMap;
-pub const shrinkMapAlloc = generators.shrinkMapAlloc;
+const collections = @import("collections.zig");
+pub const slice = collections.slice;
+pub const sliceRange = collections.sliceRange;
+pub const asciiChar = collections.asciiChar;
+pub const asciiString = collections.asciiString;
+pub const asciiStringRange = collections.asciiStringRange;
+pub const alphanumeric = collections.alphanumeric;
+pub const alphanumericString = collections.alphanumericString;
+pub const string = collections.string;
+pub const unicodeChar = collections.unicodeChar;
+pub const unicodeString = collections.unicodeString;
+pub const shuffle = collections.shuffle;
+pub const sublistOf = collections.sublistOf;
+pub const orderedList = collections.orderedList;
+pub const growingElements = collections.growingElements;
+pub const sample = collections.sample;
+pub const sampleWith = collections.sampleWith;
 
-// -- Derived generators ---------------------------------------------------
-
-pub const shuffle = generators.shuffle;
-pub const sublistOf = generators.sublistOf;
-pub const orderedList = generators.orderedList;
-pub const growingElements = generators.growingElements;
-pub const flatMap = generators.flatMap;
-pub const sized = generators.sized;
-pub const resize = generators.resize;
-pub const scale = generators.scale;
-pub const mapSize = generators.mapSize;
-pub const suchThatMap = generators.suchThatMap;
-pub const FunWith = generators.FunWith;
-pub const funGen = generators.funGen;
-pub const build = generators.build;
-pub const zip = generators.zip;
-pub const ZipResult = generators.ZipResult;
-pub const GenType = generators.GenType;
-pub const zipMap = generators.zipMap;
-pub const sliceOf = generators.sliceOf;
-pub const sliceOfRange = generators.sliceOfRange;
-pub const arrayOf = generators.arrayOf;
-pub const unicodeChar = generators.unicodeChar;
-pub const unicodeString = generators.unicodeString;
-
-// -- Utility --------------------------------------------------------------
-
-pub const sample = generators.sample;
-pub const sampleWith = generators.sampleWith;
-
-// -- Constrained integer generators ---------------------------------------
+// -- Constrained integer generators (from generators.zig) -----------------
 
 pub const positive = generators.positive;
 pub const nonNegative = generators.nonNegative;
@@ -132,6 +127,9 @@ pub const StatefulConfig = @import("stateful.zig").StatefulConfig;
 test {
     _ = @import("gen.zig");
     _ = @import("generators.zig");
+    _ = @import("combinators.zig");
+    _ = @import("collections.zig");
+    _ = @import("auto.zig");
     _ = @import("shrink.zig");
     _ = @import("runner.zig");
     _ = @import("stateful.zig");
