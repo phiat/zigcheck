@@ -86,7 +86,9 @@ pub fn StateMachine(
 
         /// Run the stateful test with explicit config.
         pub fn runWith(config: StatefulConfig, callbacks: Callbacks) !void {
-            const result = check(config, callbacks);
+            var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena_state.deinit();
+            const result = checkInternal(config, callbacks, arena_state.allocator());
             switch (result) {
                 .passed => {},
                 .failed => |f| {
@@ -110,14 +112,16 @@ pub fn StateMachine(
         }
 
         /// Run the stateful test and return the result without failing.
-        pub fn check(config: StatefulConfig, callbacks: Callbacks) Result {
+        /// The returned Result may contain slices allocated from `alloc`.
+        /// Pass an arena allocator; the caller owns the memory.
+        pub fn check(config: StatefulConfig, callbacks: Callbacks, alloc: std.mem.Allocator) Result {
+            return checkInternal(config, callbacks, alloc);
+        }
+
+        fn checkInternal(config: StatefulConfig, callbacks: Callbacks, alloc: std.mem.Allocator) Result {
             const seed = config.seed orelse @as(u64, @intCast(@as(u128, @bitCast(std.time.nanoTimestamp())) & 0xFFFFFFFFFFFFFFFF));
             var prng = std.Random.DefaultPrng.init(seed);
             const rng = prng.random();
-
-            var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena_state.deinit();
-            const alloc = arena_state.allocator();
 
             for (0..config.num_tests) |test_idx| {
                 // Generate a random command sequence
@@ -193,7 +197,7 @@ pub fn StateMachine(
             steps: usize,
         };
 
-        /// Shrink a failing sequence by trying to remove commands.
+        /// Shrink a failing sequence by removing commands, then shrinking payloads.
         fn shrinkSequence(
             config: StatefulConfig,
             callbacks: Callbacks,
@@ -203,7 +207,7 @@ pub fn StateMachine(
             var best = alloc.dupe(Cmd, original) catch return .{ .sequence = original, .steps = 0 };
             var steps: usize = 0;
 
-            // Try removing chunks of decreasing size (same strategy as slice shrinking)
+            // Phase 1: Try removing chunks of decreasing size (same strategy as slice shrinking)
             var chunk_size = best.len / 2;
             while (chunk_size >= 1 and steps < config.max_shrinks) : (chunk_size /= 2) {
                 var start: usize = 0;
@@ -225,6 +229,33 @@ pub fn StateMachine(
                     }
                 }
                 if (chunk_size == 1) break;
+            }
+
+            // Phase 2: Shrink individual command payloads.
+            // For each command, try shrink candidates from auto(Cmd) and keep
+            // the simplest version that still triggers the failure.
+            const cmd_gen = @import("auto.zig").auto(Cmd);
+            var improved = true;
+            while (improved and steps < config.max_shrinks) {
+                improved = false;
+                for (0..best.len) |i| {
+                    if (steps >= config.max_shrinks) break;
+                    var iter = cmd_gen.shrink(best[i], alloc);
+                    while (iter.next()) |simpler_cmd| {
+                        if (steps >= config.max_shrinks) break;
+                        steps += 1;
+                        // Try replacing this command with the simpler version
+                        const candidate = alloc.dupe(Cmd, best) catch break;
+                        candidate[i] = simpler_cmd;
+                        if (isValidSequence(callbacks, candidate) and
+                            executeSequence(callbacks, candidate, alloc, false) != null)
+                        {
+                            best = candidate;
+                            improved = true;
+                            break; // restart shrinking this position with the new value
+                        }
+                    }
+                }
             }
 
             return .{ .sequence = best, .steps = steps };
@@ -280,16 +311,27 @@ const StackModel = struct {
 
 test "stateful: correct stack passes" {
     const Spec = StateMachine(StackCmd, StackModel, *TestStack);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
 
-    const result = Spec.check(.{ .seed = 42, .num_tests = 50, .max_commands = 20 }, .{
+    const result = Spec.check(.{ .seed = 42, .num_tests = 50, .max_commands = 20 }, stackCallbacks(TestStack), arena.allocator());
+
+    switch (result) {
+        .passed => {},
+        .failed => return error.TestUnexpectedResult,
+    }
+}
+
+fn stackCallbacks(comptime Stack: type) StateMachine(StackCmd, StackModel, *Stack).Callbacks {
+    return .{
         .init_model = struct {
             fn f() StackModel {
                 return .{};
             }
         }.f,
         .init_sut = struct {
-            fn f(alloc: std.mem.Allocator) !*TestStack {
-                const stack = try alloc.create(TestStack);
+            fn f(alloc: std.mem.Allocator) !*Stack {
+                const stack = try alloc.create(Stack);
                 stack.* = .{};
                 return stack;
             }
@@ -312,7 +354,7 @@ test "stateful: correct stack passes" {
             }
         }.f,
         .run_command = struct {
-            fn f(sut: *TestStack, cmd: StackCmd) !void {
+            fn f(sut: *Stack, cmd: StackCmd) !void {
                 switch (cmd) {
                     .push => |val| sut.push(val),
                     .pop => _ = sut.pop(),
@@ -328,7 +370,7 @@ test "stateful: correct stack passes" {
             }
         }.f,
         .postcondition = struct {
-            fn f(model: StackModel, cmd: StackCmd, sut: *TestStack) !void {
+            fn f(model: StackModel, cmd: StackCmd, sut: *Stack) !void {
                 const expected_size: usize = switch (cmd) {
                     .push => model.size + 1,
                     .pop => model.size - 1,
@@ -338,12 +380,7 @@ test "stateful: correct stack passes" {
                 }
             }
         }.f,
-    });
-
-    switch (result) {
-        .passed => {},
-        .failed => return error.TestUnexpectedResult,
-    }
+    };
 }
 
 test "stateful: buggy stack detects failure and shrinks" {
@@ -373,71 +410,23 @@ test "stateful: buggy stack detects failure and shrinks" {
     };
 
     const Spec = StateMachine(StackCmd, StackModel, *BuggyStack);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
 
-    const result = Spec.check(.{ .seed = 42, .num_tests = 50, .max_commands = 20 }, .{
-        .init_model = struct {
-            fn f() StackModel {
-                return .{};
-            }
-        }.f,
-        .init_sut = struct {
-            fn f(alloc: std.mem.Allocator) !*BuggyStack {
-                const stack = try alloc.create(BuggyStack);
-                stack.* = .{};
-                return stack;
-            }
-        }.f,
-        .gen_command = struct {
-            fn f(_: StackModel, rng: std.Random, _: std.mem.Allocator) ?StackCmd {
-                if (rng.boolean()) {
-                    return .{ .push = rng.intRangeAtMost(i32, -10, 10) };
-                } else {
-                    return .pop;
-                }
-            }
-        }.f,
-        .precondition = struct {
-            fn f(model: StackModel, cmd: StackCmd) bool {
-                return switch (cmd) {
-                    .push => model.size < 64,
-                    .pop => model.size > 0,
-                };
-            }
-        }.f,
-        .run_command = struct {
-            fn f(sut: *BuggyStack, cmd: StackCmd) !void {
-                switch (cmd) {
-                    .push => |val| sut.push(val),
-                    .pop => _ = sut.pop(),
-                }
-            }
-        }.f,
-        .next_model = struct {
-            fn f(model: StackModel, cmd: StackCmd) StackModel {
-                return switch (cmd) {
-                    .push => .{ .size = model.size + 1 },
-                    .pop => .{ .size = model.size - 1 },
-                };
-            }
-        }.f,
-        .postcondition = struct {
-            fn f(model: StackModel, cmd: StackCmd, sut: *BuggyStack) !void {
-                const expected_size: usize = switch (cmd) {
-                    .push => model.size + 1,
-                    .pop => model.size - 1,
-                };
-                if (sut.size() != expected_size) {
-                    return error.SizeMismatch;
-                }
-            }
-        }.f,
-    });
+    const result = Spec.check(.{ .seed = 42, .num_tests = 50, .max_commands = 20 }, stackCallbacks(BuggyStack), arena.allocator());
 
     switch (result) {
         .failed => |f| {
             // The shrunk sequence should be minimal: exactly 4 pushes to trigger the bug
             try testing.expect(f.shrunk_sequence.len <= f.sequence.len);
             try testing.expect(f.shrunk_sequence.len >= 4); // Need >3 pushes to trigger bug
+            // Payload shrinking: push values should shrink toward 0
+            for (f.shrunk_sequence) |cmd| {
+                switch (cmd) {
+                    .push => |val| try testing.expectEqual(@as(i32, 0), val),
+                    .pop => {},
+                }
+            }
         },
         .passed => return error.TestUnexpectedResult,
     }

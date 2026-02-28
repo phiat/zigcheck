@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-177_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-178_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.5.2-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -486,7 +486,7 @@ try Spec.runWith(.{ .num_tests = 100, .max_commands = 30 }, .{
 
 If your SUT holds resources (sockets, arenas, file handles), pass `.cleanup_sut = myCleanupFn` to free them after each test sequence.
 
-Failing sequences are automatically shrunk by removing chunks of commands (same strategy as slice shrinking), producing minimal counterexamples.
+Failing sequences are automatically shrunk in two phases: first by removing chunks of commands (same strategy as slice shrinking), then by shrinking individual command payloads (e.g., `push(1000)` shrinks to `push(0)`). This produces truly minimal counterexamples.
 
 ### Utility
 
