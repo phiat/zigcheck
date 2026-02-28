@@ -1,7 +1,7 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-169%2B_passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-172%2B_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.0-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
@@ -287,10 +287,12 @@ try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
 | `oneOf(T, gens)` | `Gen(T)` | Picks from multiple generators |
 | `frequency(T, weighted)` | `Gen(T)` | Weighted choice from `{weight, gen}` pairs |
 | `map(A, B, gen, fn)` | `Gen(B)` | Transform output type (no shrinking; use `shrinkMap`) |
+| `mapAlloc(A, B, gen, fn)` | `Gen(B)` | Like `map` but `fn` receives the arena allocator |
 | `filter(T, gen, pred)` | `Gen(T)` | Retry until predicate holds |
 | `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation (no shrinking) |
 | `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
 | `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
+| `shrinkMapAlloc(A, B, gen, fwd, bwd)` | `Gen(B)` | Like `shrinkMap` but `fwd`/`bwd` receive the arena allocator |
 | `sized(T, factory)` | `Gen(T)` | Generator from size-dependent factory function |
 | `resize(T, gen, size)` | `Gen(T)` | Override size parameter to a fixed value |
 | `scale(T, gen, pct)` | `Gen(T)` | Scale size parameter by percentage |

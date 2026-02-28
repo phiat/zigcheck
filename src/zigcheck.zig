@@ -78,10 +78,12 @@ pub const element = generators.element;
 pub const oneOf = generators.oneOf;
 pub const frequency = generators.frequency;
 pub const map = generators.map;
+pub const mapAlloc = generators.mapAlloc;
 pub const filter = generators.filter;
 pub const FilterExhausted = generators.FilterExhausted;
 pub const noShrink = generators.noShrink;
 pub const shrinkMap = generators.shrinkMap;
+pub const shrinkMapAlloc = generators.shrinkMapAlloc;
 
 // -- Derived generators ---------------------------------------------------
 

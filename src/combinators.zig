@@ -166,6 +166,31 @@ pub fn map(
     };
 }
 
+/// Transform generator output using a function that may allocate.
+/// The allocator passed to `f` is the runner's generation arena —
+/// allocations survive for the lifetime of the current test case.
+/// WARNING: shrinking is disabled because `f` is not invertible.
+/// Use `shrinkMapAlloc` for shrink support.
+pub fn mapAlloc(
+    comptime A: type,
+    comptime B: type,
+    comptime inner: Gen(A),
+    comptime f: *const fn (A, std.mem.Allocator) B,
+) Gen(B) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                return f(inner.generate(rng, allocator, size), allocator);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(_: B, _: std.mem.Allocator) ShrinkIter(B) {
+                return ShrinkIter(B).empty();
+            }
+        }.shrinkFn,
+    };
+}
+
 /// Error returned when a filter predicate rejects too many consecutive values.
 pub const FilterExhausted = error.FilterExhausted;
 
@@ -334,6 +359,56 @@ pub fn shrinkMap(
                             const s: *State = @ptrCast(@alignCast(ctx));
                             if (s.a_iter.next()) |a_val| {
                                 return forward(a_val);
+                            }
+                            return null;
+                        }
+                    }.next,
+                };
+            }
+        }.shrinkFn,
+    };
+}
+
+/// Shrink via isomorphism where both directions may allocate.
+/// Like `shrinkMap`, but `forward` and `backward` receive the arena allocator.
+/// Use when the A->B transform needs to allocate (e.g. building a string
+/// from a spec struct).
+pub fn shrinkMapAlloc(
+    comptime A: type,
+    comptime B: type,
+    comptime inner: Gen(A),
+    comptime forward: *const fn (A, std.mem.Allocator) B,
+    comptime backward: *const fn (B, std.mem.Allocator) A,
+) Gen(B) {
+    return .{
+        .genFn = struct {
+            fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) B {
+                return forward(inner.generate(rng, allocator, size), allocator);
+            }
+        }.gen,
+        .shrinkFn = struct {
+            fn shrinkFn(value: B, allocator: std.mem.Allocator) ShrinkIter(B) {
+                const a_value = backward(value, allocator);
+                const inner_iter = allocator.create(ShrinkIter(A)) catch return ShrinkIter(B).empty();
+                inner_iter.* = inner.shrink(a_value, allocator);
+
+                const State = struct {
+                    a_iter: *ShrinkIter(A),
+                    alloc: std.mem.Allocator,
+                };
+                const state = allocator.create(State) catch {
+                    allocator.destroy(inner_iter);
+                    return ShrinkIter(B).empty();
+                };
+                state.* = .{ .a_iter = inner_iter, .alloc = allocator };
+
+                return .{
+                    .context = @ptrCast(state),
+                    .nextFn = struct {
+                        fn next(ctx: *anyopaque) ?B {
+                            const s: *State = @ptrCast(@alignCast(ctx));
+                            if (s.a_iter.next()) |a_val| {
+                                return forward(a_val, s.alloc);
                             }
                             return null;
                         }
@@ -1019,6 +1094,19 @@ test "map: transforms values" {
     }
 }
 
+test "mapAlloc: no shrinking" {
+    const g = mapAlloc(u32, []const u8, generators.int(u32), struct {
+        fn f(x: u32, allocator: std.mem.Allocator) []const u8 {
+            return std.fmt.allocPrint(allocator, "{d}", .{x}) catch "?";
+        }
+    }.f);
+    // Verify shrinking is empty
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var si = g.shrink("123", arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+
 test "filter: only produces values satisfying predicate" {
     const g = filter(i32, generators.int(i32), struct {
         fn pred(n: i32) bool {
@@ -1119,6 +1207,51 @@ test "shrinkMap: shrinks via isomorphism" {
     // Shrink 100 -- should get 0 first (i32 shrinker starts with 0, mapped to u32 0)
     var si = g.shrink(100, arena_state.allocator());
     try std.testing.expectEqual(@as(u32, 0), si.next().?);
+}
+
+test "mapAlloc: transforms values with allocator" {
+    // Map i32 to its string representation using the allocator
+    const g = mapAlloc(i32, []const u8, generators.intRange(i32, 0, 99), struct {
+        fn f(n: i32, allocator: std.mem.Allocator) []const u8 {
+            return std.fmt.allocPrint(allocator, "{d}", .{n}) catch "?";
+        }
+    }.f);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    for (0..50) |_| {
+        const v = g.generate(prng.random(), arena_state.allocator(), 100);
+        try std.testing.expect(v.len >= 1 and v.len <= 2); // "0"-"99"
+    }
+    // Verify no shrinking (mapAlloc has no inverse)
+    var si = g.shrink("42", arena_state.allocator());
+    try std.testing.expectEqual(null, si.next());
+}
+
+test "shrinkMapAlloc: shrinks via allocating isomorphism" {
+    // Forward: i32 -> string representation (allocates)
+    // Backward: string -> i32 (parses, may allocate intermediate state)
+    const g = shrinkMapAlloc(i32, []const u8, generators.intRange(i32, 0, 999), struct {
+        fn forward(n: i32, allocator: std.mem.Allocator) []const u8 {
+            return std.fmt.allocPrint(allocator, "{d}", .{n}) catch "?";
+        }
+    }.forward, struct {
+        fn backward(s: []const u8, _: std.mem.Allocator) i32 {
+            return std.fmt.parseInt(i32, s, 10) catch 0;
+        }
+    }.backward);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+
+    // Generate a value
+    var prng = std.Random.DefaultPrng.init(42);
+    const v = g.generate(prng.random(), arena_state.allocator(), 100);
+    try std.testing.expect(v.len >= 1); // Some string representation
+
+    // Shrink "100" — backward maps to 100, i32 shrinker yields 0, forward maps to "0"
+    var si = g.shrink("100", arena_state.allocator());
+    const first = si.next().?;
+    try std.testing.expectEqualStrings("0", first);
 }
 
 test "flatMap: dependent generation" {
