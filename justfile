@@ -32,6 +32,12 @@ push:
     git push origin main --tags
     git push github main --tags
 
+# Tag and release (usage: just release "0.5.5" "release notes here")
+release VERSION NOTES:
+    git tag -a "v{{VERSION}}" -m "v{{VERSION}}"
+    just push
+    gh release create "v{{VERSION}}" --repo phiat/zigcheck --title "v{{VERSION}}" --notes "{{NOTES}}"
+
 # List open issues
 issues:
     bd list --status=open
