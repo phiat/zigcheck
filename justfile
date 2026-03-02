@@ -27,10 +27,10 @@ stats:
     @echo "Tests:      $(grep -r 'test "' src/*.zig | wc -l) tests"
     @echo "Generators: $(grep -c '^pub ' src/generators.zig) public exports"
 
-# Push to all remotes
+# Push to all remotes (with tags)
 push:
-    git push origin main
-    git push github main
+    git push origin main --tags
+    git push github main --tags
 
 # List open issues
 issues:
