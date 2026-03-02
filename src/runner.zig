@@ -377,6 +377,18 @@ fn logFailure(num_tests: usize, comptime ce_fmt: []const u8, ce_args: anytype, c
     , .{num_tests} ++ ce_args ++ .{shrink_steps} ++ orig_args ++ .{ seed, seed });
 }
 
+fn logShrinkPath(comptime T: type, original: T, path: []const T, total_steps: usize) void {
+    // Print a compact summary: original -> step1 -> step2 -> ... -> final
+    std.log.info("zigcheck shrink path ({d} steps):", .{total_steps});
+    std.log.info("  start: {any}", .{original});
+    for (path, 0..) |value, i| {
+        std.log.info("  [{d}]: {any}", .{ i + 1, value });
+    }
+    if (total_steps > path.len) {
+        std.log.info("  ... ({d} more steps truncated)", .{total_steps - path.len});
+    }
+}
+
 fn logGaveUp(num_tests: usize, num_discarded: usize) void {
     std.log.err(
         \\
@@ -464,7 +476,7 @@ pub fn check(
 }
 
 fn ShrinkResult(comptime T: type) type {
-    return struct { value: T, steps: usize };
+    return struct { value: T, steps: usize, path: ?[]const T = null };
 }
 
 fn doShrink(
@@ -487,6 +499,9 @@ fn doShrink(
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
 
+    // When verbose_shrink is enabled, collect the shrink path for the summary.
+    var path_buf: [128]T = undefined;
+
     for (0..max_shrinks) |_| {
         var iter = gen.shrink(best, arena_state.allocator());
         var improved = false;
@@ -503,6 +518,9 @@ fn doShrink(
                 if (err == TestDiscarded) continue;
                 // Still fails -- this is a better (simpler) counterexample
                 best = candidate;
+                if (verbose_shrink and steps < path_buf.len) {
+                    path_buf[steps] = candidate;
+                }
                 steps += 1;
                 improved = true;
                 if (verbose_shrink) {
@@ -513,6 +531,11 @@ fn doShrink(
         }
 
         if (!improved) break; // no simpler counterexample found
+    }
+
+    if (verbose_shrink and steps > 0) {
+        const path_len = @min(steps, path_buf.len);
+        logShrinkPath(T, original, path_buf[0..path_len], steps);
     }
 
     return .{ .value = best, .steps = steps };

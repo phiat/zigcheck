@@ -28,7 +28,12 @@ pub fn Gen(comptime T: type) type {
         /// yields progressively simpler values. The allocator should be an
         /// arena — shrink functions may allocate iteratively without freeing,
         /// relying on bulk deallocation when shrinking completes.
-        shrinkFn: *const fn (value: T, allocator: std.mem.Allocator) ShrinkIter(T),
+        /// Defaults to no shrinking (empty iterator).
+        shrinkFn: *const fn (value: T, allocator: std.mem.Allocator) ShrinkIter(T) = &struct {
+            fn noShrink(_: T, _: std.mem.Allocator) ShrinkIter(T) {
+                return ShrinkIter(T).empty();
+            }
+        }.noShrink,
 
         /// Generate a random value with the given size parameter.
         pub fn generate(self: Self, rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
@@ -92,6 +97,24 @@ test "Gen: basic construction and generation" {
     const val = g.generate(prng.random(), std.testing.allocator, 100);
     // Just verify it doesn't crash and produces a value
     _ = val;
+}
+
+test "Gen: default shrinkFn produces empty iterator" {
+    const g = Gen(u32){
+        .genFn = struct {
+            fn f(rng: std.Random, _: std.mem.Allocator, _: usize) u32 {
+                return rng.int(u32);
+            }
+        }.f,
+    };
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const val = g.generate(prng.random(), std.testing.allocator, 100);
+    _ = val;
+
+    // Default shrinkFn returns empty iterator
+    var si = g.shrink(42, std.testing.allocator);
+    try std.testing.expectEqual(null, si.next());
 }
 
 test "Gen.fromGenFn: construct without shrink boilerplate" {

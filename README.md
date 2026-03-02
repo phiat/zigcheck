@@ -3,7 +3,7 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
 [![Tests](https://img.shields.io/badge/tests-184_passing-brightgreen)](#running-tests)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.4-orange)](build.zig.zon)
+[![Version](https://img.shields.io/badge/version-0.5.5-orange)](build.zig.zon)
 [![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
 [![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
 [![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
@@ -211,7 +211,7 @@ Add zigcheck as a Zig package dependency in your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/v0.5.4.tar.gz",
+        .url = "https://github.com/phiat/zigcheck/archive/v0.5.5.tar.gz",
         // .hash = "...",  // zig build will tell you the expected hash
     },
 },
@@ -322,6 +322,67 @@ const weighted = comptime zigcheck.frequency(u32, &.{
     .{ 9, zigcheck.generators.intRange(u32, 0, 10) },
     .{ 1, zigcheck.generators.intRange(u32, 1000, 10000) },
 });
+```
+
+### Composed combinator examples
+
+Combinators compose — chain `map`, `filter`, `shrinkMap`, and `flatMap` to build domain-specific generators from primitives.
+
+**map + filter: domain-constrained types**
+
+```zig
+// Generate valid HTTP port numbers (1024-65535), mapped to a Port struct
+const Port = struct { value: u16 };
+const portGen = comptime zigcheck.map(
+    u16, Port,
+    zigcheck.filter(u16, zigcheck.generators.int(u16), struct {
+        fn pred(n: u16) bool { return n >= 1024; }
+    }.pred),
+    struct { fn f(n: u16) Port { return .{ .value = n }; } }.f,
+);
+```
+
+**shrinkMap: isomorphic domain types with shrinking**
+
+```zig
+// Generate timestamps as u64, shrink in integer space, convert both ways
+const Timestamp = struct { epoch_ms: u64 };
+const timestampGen = comptime zigcheck.shrinkMap(
+    u64, Timestamp,
+    zigcheck.generators.intRange(u64, 0, 4_102_444_800_000), // up to 2100
+    struct { fn fwd(ms: u64) Timestamp { return .{ .epoch_ms = ms }; } }.fwd,
+    struct { fn bwd(ts: Timestamp) u64 { return ts.epoch_ms; } }.bwd,
+);
+```
+
+**flatMap: dependent generation**
+
+```zig
+// Generate a length, then a string of exactly that length
+const exactLenString = comptime zigcheck.flatMap(
+    u8, []const u8,
+    zigcheck.generators.intRange(u8, 1, 20),
+    struct {
+        fn f(len: u8) zigcheck.Gen([]const u8) {
+            return zigcheck.sliceOfRange(zigcheck.generators.alphanumeric(), len, len);
+        }
+    }.f,
+);
+```
+
+**suchThatMap: filter + transform in one step**
+
+```zig
+// Generate non-empty strings and return their first character
+const firstChar = comptime zigcheck.suchThatMap(
+    []const u8, u8,
+    zigcheck.generators.asciiString(50),
+    struct {
+        fn f(s: []const u8) ?u8 {
+            return if (s.len > 0) s[0] else null; // null = discard
+        }
+    }.f,
+);
 ```
 
 ### Collection generators
