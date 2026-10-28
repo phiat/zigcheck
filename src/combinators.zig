@@ -592,23 +592,24 @@ pub fn FunWith(comptime A: type, comptime B: type, comptime gen_b: Gen(B)) type 
 /// ```
 pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
     const struct_info = @typeInfo(T).@"struct";
-    const fields = struct_info.fields;
+    const names = struct_info.field_names;
+    const types = struct_info.field_types;
     const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
 
-    if (gens_info.fields.len != fields.len) {
+    if (gens_info.field_names.len != names.len) {
         @compileError(std.fmt.comptimePrint(
             "build({s}): expected {d} generators (one per field), got {d}",
-            .{ @typeName(T), fields.len, gens_info.fields.len },
+            .{ @typeName(T), names.len, gens_info.field_names.len },
         ));
     }
 
     // Validate each generator's output type matches the corresponding field
-    inline for (fields, 0..) |field, i| {
+    inline for (names, types, 0..) |name, FieldType, i| {
         const FieldGenType = @TypeOf(gens[i]);
-        if (FieldGenType != Gen(field.type)) {
+        if (FieldGenType != Gen(FieldType)) {
             @compileError(std.fmt.comptimePrint(
                 "build({s}): field '{s}' has type {s}, but generator {d} produces {s}",
-                .{ @typeName(T), field.name, @typeName(field.type), i, @typeName(FieldGenType) },
+                .{ @typeName(T), name, @typeName(FieldType), i, @typeName(FieldGenType) },
             ));
         }
     }
@@ -617,28 +618,28 @@ pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
         .genFn = struct {
             fn f(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) T {
                 var result: T = undefined;
-                inline for (fields, 0..) |field, i| {
-                    @field(result, field.name) = gens[i].generate(rng, allocator, size_param);
+                inline for (names, 0..) |name, i| {
+                    @field(result, name) = gens[i].generate(rng, allocator, size_param);
                 }
                 return result;
             }
         }.f,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                if (fields.len == 0) return ShrinkIter(T).empty();
+                if (names.len == 0) return ShrinkIter(T).empty();
 
-                const iters = allocator.alloc(ShrinkIter(T), fields.len) catch return ShrinkIter(T).empty();
+                const iters = allocator.alloc(ShrinkIter(T), names.len) catch return ShrinkIter(T).empty();
 
-                inline for (fields, 0..) |field, i| {
+                inline for (names, types, 0..) |name, FieldType, i| {
                     const Mapper = struct {
                         original: T,
-                        field_shrinker: ShrinkIter(field.type),
+                        field_shrinker: ShrinkIter(FieldType),
 
                         fn nextMapped(ctx: *anyopaque) ?T {
                             const self: *@This() = @ptrCast(@alignCast(ctx));
                             if (self.field_shrinker.next()) |shrunk_val| {
                                 var result = self.original;
-                                @field(result, field.name) = shrunk_val;
+                                @field(result, name) = shrunk_val;
                                 return result;
                             }
                             return null;
@@ -647,7 +648,7 @@ pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
                     const mapper = allocator.create(Mapper) catch return ShrinkIter(T).empty();
                     mapper.* = .{
                         .original = value,
-                        .field_shrinker = gens[i].shrink(@field(value, field.name), allocator),
+                        .field_shrinker = gens[i].shrink(@field(value, name), allocator),
                     };
                     iters[i] = .{
                         .context = @ptrCast(mapper),
@@ -684,35 +685,35 @@ pub fn build(comptime T: type, comptime gens: anytype) Gen(T) {
 /// ```
 pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
     const R = ZipResult(gens);
-    const r_fields = @typeInfo(R).@"struct".fields;
+    const r_info = @typeInfo(R).@"struct";
     const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
 
     return .{
         .genFn = struct {
             fn f(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) R {
                 var result: R = undefined;
-                inline for (gens_info.fields, 0..) |_, i| {
-                    @field(result, r_fields[i].name) = gens[i].generate(rng, allocator, size_param);
+                inline for (gens_info.field_names, 0..) |_, i| {
+                    @field(result, r_info.field_names[i]) = gens[i].generate(rng, allocator, size_param);
                 }
                 return result;
             }
         }.f,
         .shrinkFn = struct {
             fn f(value: R, allocator: std.mem.Allocator) ShrinkIter(R) {
-                if (r_fields.len == 0) return ShrinkIter(R).empty();
+                if (r_info.field_names.len == 0) return ShrinkIter(R).empty();
 
-                const iters = allocator.alloc(ShrinkIter(R), r_fields.len) catch return ShrinkIter(R).empty();
+                const iters = allocator.alloc(ShrinkIter(R), r_info.field_names.len) catch return ShrinkIter(R).empty();
 
-                inline for (r_fields, 0..) |field, i| {
+                inline for (r_info.field_names, r_info.field_types, 0..) |name, FieldType, i| {
                     const Mapper = struct {
                         original: R,
-                        field_shrinker: ShrinkIter(field.type),
+                        field_shrinker: ShrinkIter(FieldType),
 
                         fn nextMapped(ctx: *anyopaque) ?R {
                             const self: *@This() = @ptrCast(@alignCast(ctx));
                             if (self.field_shrinker.next()) |shrunk_val| {
                                 var result = self.original;
-                                @field(result, field.name) = shrunk_val;
+                                @field(result, name) = shrunk_val;
                                 return result;
                             }
                             return null;
@@ -721,7 +722,7 @@ pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
                     const mapper = allocator.create(Mapper) catch return ShrinkIter(R).empty();
                     mapper.* = .{
                         .original = value,
-                        .field_shrinker = gens[i].shrink(@field(value, field.name), allocator),
+                        .field_shrinker = gens[i].shrink(@field(value, name), allocator),
                     };
                     iters[i] = .{
                         .context = @ptrCast(mapper),
@@ -738,30 +739,18 @@ pub fn zip(comptime gens: anytype) Gen(ZipResult(gens)) {
 /// Extract the element type T from a Gen(T).
 pub fn GenType(comptime G: type) type {
     const gen_info = @typeInfo(G).@"struct";
-    const gen_fn_info = @typeInfo(@typeInfo(gen_info.fields[0].type).pointer.child).@"fn";
+    const gen_fn_info = @typeInfo(@typeInfo(gen_info.field_types[0]).pointer.child).@"fn";
     return gen_fn_info.return_type.?;
 }
 
 /// Compute the result type of `zip` — a tuple struct with one field per generator.
 pub fn ZipResult(comptime gens: anytype) type {
     const gens_info = @typeInfo(@TypeOf(gens)).@"struct";
-    var fields: [gens_info.fields.len]std.builtin.Type.StructField = undefined;
-    inline for (gens_info.fields, 0..) |_, i| {
-        const T = GenType(@TypeOf(gens[i]));
-        fields[i] = .{
-            .name = std.fmt.comptimePrint("{d}", .{i}),
-            .type = T,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(T),
-        };
+    var types: [gens_info.field_names.len]type = undefined;
+    inline for (gens_info.field_names, 0..) |_, i| {
+        types[i] = GenType(@TypeOf(gens[i]));
     }
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = true,
-    } });
+    return @Tuple(&types);
 }
 
 /// Zip multiple generators and map the result into a target type in one step.
@@ -791,9 +780,9 @@ pub fn zipMap(
         .genFn = struct {
             fn gen(rng: std.Random, allocator: std.mem.Allocator, size_param: usize) R {
                 var tuple: Tuple = undefined;
-                const r_fields = @typeInfo(Tuple).@"struct".fields;
-                inline for (gens_info.fields, 0..) |_, i| {
-                    @field(tuple, r_fields[i].name) = gens[i].generate(rng, allocator, size_param);
+                const r_names = @typeInfo(Tuple).@"struct".field_names;
+                inline for (gens_info.field_names, 0..) |_, i| {
+                    @field(tuple, r_names[i]) = gens[i].generate(rng, allocator, size_param);
                 }
                 return @call(.auto, f, tuple);
             }
@@ -1358,7 +1347,7 @@ test "ZipResult: produces correct tuple type" {
     });
     const info = @typeInfo(T).@"struct";
     try std.testing.expect(info.is_tuple);
-    try std.testing.expectEqual(@as(usize, 2), info.fields.len);
+    try std.testing.expectEqual(@as(usize, 2), info.field_names.len);
 }
 
 test "GenType: extracts element type from generator" {

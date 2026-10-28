@@ -39,7 +39,7 @@ pub fn auto(comptime T: type) Gen(T) {
         .@"struct" => structGen(T),
         .optional => |info| optionalGen(info.child),
         .pointer => |info| blk: {
-            if (info.size == .slice and info.is_const) {
+            if (info.size == .slice and info.attrs.@"const") {
                 break :blk sliceAutoGen(info.child);
             }
             @compileError("zigcheck.auto: unsupported pointer type " ++ @typeName(T) ++ "; only []const T slices are supported");
@@ -60,32 +60,32 @@ fn enumGen(comptime T: type) Gen(T) {
     return .{
         .genFn = struct {
             fn f(rng: std.Random, _: std.mem.Allocator, _: usize) T {
-                const fields = @typeInfo(T).@"enum".fields;
-                const index = rng.intRangeAtMost(usize, 0, fields.len - 1);
-                inline for (fields, 0..) |field, i| {
-                    if (index == i) return @enumFromInt(field.value);
+                const values = @typeInfo(T).@"enum".field_values;
+                const index = rng.intRangeAtMost(usize, 0, values.len - 1);
+                inline for (values, 0..) |value, i| {
+                    if (index == i) return @fromBackingInt(@intCast(value));
                 }
                 unreachable;
             }
         }.f,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                const fields = @typeInfo(T).@"enum".fields;
-                const tag_val = @intFromEnum(value);
+                const values = @typeInfo(T).@"enum".field_values;
+                const tag_val = @backingInt(value);
 
                 // Find declaration index of current value
-                var current_idx: usize = fields.len;
-                inline for (fields, 0..) |field, i| {
-                    if (field.value == tag_val) current_idx = i;
+                var current_idx: usize = values.len;
+                inline for (values, 0..) |field_value, i| {
+                    if (field_value == tag_val) current_idx = i;
                 }
 
-                if (current_idx == 0 or current_idx == fields.len) return ShrinkIter(T).empty();
+                if (current_idx == 0 or current_idx == values.len) return ShrinkIter(T).empty();
 
                 // Allocate array of candidates with lower declaration index
                 const candidates = allocator.alloc(T, current_idx) catch return ShrinkIter(T).empty();
-                inline for (fields, 0..) |field, i| {
+                inline for (values, 0..) |field_value, i| {
                     if (i < current_idx) {
-                        candidates[i] = @enumFromInt(field.value);
+                        candidates[i] = @fromBackingInt(@intCast(field_value));
                     }
                 }
 
@@ -126,39 +126,40 @@ fn structGen(comptime T: type) Gen(T) {
         .genFn = struct {
             fn f(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
                 var result: T = undefined;
-                inline for (@typeInfo(T).@"struct".fields) |field| {
-                    @field(result, field.name) = auto(field.type).generate(rng, allocator, size);
+                const info = @typeInfo(T).@"struct";
+                inline for (info.field_names, info.field_types) |name, FieldType| {
+                    @field(result, name) = auto(FieldType).generate(rng, allocator, size);
                 }
                 return result;
             }
         }.f,
         .shrinkFn = struct {
             fn f(value: T, allocator: std.mem.Allocator) ShrinkIter(T) {
-                const struct_fields = @typeInfo(T).@"struct".fields;
-                if (struct_fields.len == 0) return ShrinkIter(T).empty();
+                const info = @typeInfo(T).@"struct";
+                if (info.field_names.len == 0) return ShrinkIter(T).empty();
 
-                const iters = allocator.alloc(ShrinkIter(T), struct_fields.len) catch return ShrinkIter(T).empty();
+                const iters = allocator.alloc(ShrinkIter(T), info.field_names.len) catch return ShrinkIter(T).empty();
 
-                inline for (struct_fields, 0..) |field, i| {
+                inline for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
                     const Mapper = struct {
                         original: T,
-                        field_shrinker: ShrinkIter(field.type),
+                        field_shrinker: ShrinkIter(FieldType),
 
                         fn nextMapped(ctx: *anyopaque) ?T {
                             const self: *@This() = @ptrCast(@alignCast(ctx));
                             if (self.field_shrinker.next()) |shrunk_val| {
                                 var result = self.original;
-                                @field(result, field.name) = shrunk_val;
+                                @field(result, name) = shrunk_val;
                                 return result;
                             }
                             return null;
                         }
                     };
                     const mapper = allocator.create(Mapper) catch return ShrinkIter(T).empty();
-                    const field_gen = auto(field.type);
+                    const field_gen = auto(FieldType);
                     mapper.* = .{
                         .original = value,
-                        .field_shrinker = field_gen.shrink(@field(value, field.name), allocator),
+                        .field_shrinker = field_gen.shrink(@field(value, name), allocator),
                     };
                     iters[i] = .{
                         .context = @ptrCast(mapper),
@@ -230,23 +231,24 @@ fn sliceAutoGen(comptime Child: type) Gen([]const Child) {
 /// if compile times are affected.
 fn unionGen(comptime T: type) Gen(T) {
     const info = @typeInfo(T).@"union";
-    const fields = info.fields;
+    const names = info.field_names;
+    const types = info.field_types;
     comptime {
-        if (fields.len == 0) @compileError("unionGen: union has no fields");
-        if (fields.len > 100) {
-            @compileLog("zigcheck.auto: union " ++ @typeName(T) ++ " has " ++ std.fmt.comptimePrint("{d}", .{fields.len}) ++ " variants; consider a manual generator if compile times are slow");
+        if (names.len == 0) @compileError("unionGen: union has no fields");
+        if (names.len > 100) {
+            @compileLog("zigcheck.auto: union " ++ @typeName(T) ++ " has " ++ std.fmt.comptimePrint("{d}", .{names.len}) ++ " variants; consider a manual generator if compile times are slow");
         }
     }
     return .{
         .genFn = struct {
             fn gen(rng: std.Random, allocator: std.mem.Allocator, size: usize) T {
-                const idx = rng.intRangeAtMost(usize, 0, fields.len - 1);
-                inline for (fields, 0..) |field, i| {
+                const idx = rng.intRangeAtMost(usize, 0, names.len - 1);
+                inline for (names, types, 0..) |name, FieldType, i| {
                     if (idx == i) {
-                        if (field.type == void) {
-                            return @unionInit(T, field.name, {});
+                        if (FieldType == void) {
+                            return @unionInit(T, name, {});
                         } else {
-                            return @unionInit(T, field.name, auto(field.type).generate(rng, allocator, size));
+                            return @unionInit(T, name, auto(FieldType).generate(rng, allocator, size));
                         }
                     }
                 }
@@ -260,16 +262,16 @@ fn unionGen(comptime T: type) Gen(T) {
                 // the source-level field order, consistent with enumGen's shrinker.
                 //
                 // Find the declaration index of the active variant at runtime.
-                var current_idx: usize = fields.len;
-                inline for (fields, 0..) |field, i| {
-                    if (std.meta.activeTag(value) == @field(info.tag_type.?, field.name)) {
+                var current_idx: usize = names.len;
+                inline for (names, 0..) |name, i| {
+                    if (std.meta.activeTag(value) == @field(info.tag_type.?, name)) {
                         current_idx = i;
                     }
                 }
 
                 // Count earlier variants (by declaration order) as shrink candidates.
                 var count: usize = 0;
-                inline for (fields, 0..) |_, i| {
+                inline for (names, 0..) |_, i| {
                     if (i < current_idx) {
                         count += 1;
                     }
@@ -282,13 +284,13 @@ fn unionGen(comptime T: type) Gen(T) {
 
                 const candidates = allocator.alloc(T, count) catch return ShrinkIter(T).empty();
                 var pos: usize = 0;
-                inline for (fields, 0..) |field, i| {
+                inline for (names, types, 0..) |name, FieldType, i| {
                     if (i < current_idx) {
-                        if (field.type == void) {
-                            candidates[pos] = @unionInit(T, field.name, {});
+                        if (FieldType == void) {
+                            candidates[pos] = @unionInit(T, name, {});
                         } else {
                             // Try zero/default value for non-void earlier variants
-                            candidates[pos] = @unionInit(T, field.name, std.mem.zeroes(field.type));
+                            candidates[pos] = @unionInit(T, name, std.mem.zeroes(FieldType));
                         }
                         pos += 1;
                     }
@@ -329,21 +331,20 @@ fn unionGen(comptime T: type) Gen(T) {
 
             fn shrinkUnionPayload(comptime U: type, value: U, allocator: std.mem.Allocator) ShrinkIter(U) {
                 const u_info = @typeInfo(U).@"union";
-                const u_fields = u_info.fields;
-                inline for (u_fields) |field| {
-                    if (std.meta.activeTag(value) == @field(u_info.tag_type.?, field.name)) {
-                        if (field.type == void) return ShrinkIter(U).empty();
-                        const payload = @field(value, field.name);
-                        const inner_iter = allocator.create(ShrinkIter(field.type)) catch return ShrinkIter(U).empty();
-                        inner_iter.* = auto(field.type).shrink(payload, allocator);
+                inline for (u_info.field_names, u_info.field_types) |name, FieldType| {
+                    if (std.meta.activeTag(value) == @field(u_info.tag_type.?, name)) {
+                        if (FieldType == void) return ShrinkIter(U).empty();
+                        const payload = @field(value, name);
+                        const inner_iter = allocator.create(ShrinkIter(FieldType)) catch return ShrinkIter(U).empty();
+                        inner_iter.* = auto(FieldType).shrink(payload, allocator);
 
                         const Mapper = struct {
-                            inner: *ShrinkIter(field.type),
+                            inner: *ShrinkIter(FieldType),
 
                             fn nextMapped(ctx: *anyopaque) ?U {
                                 const self: *@This() = @ptrCast(@alignCast(ctx));
                                 if (self.inner.next()) |shrunk_payload| {
-                                    return @unionInit(U, field.name, shrunk_payload);
+                                    return @unionInit(U, name, shrunk_payload);
                                 }
                                 return null;
                             }
@@ -371,7 +372,7 @@ test "enum generator produces all variants" {
     var seen = [_]bool{ false, false, false };
     for (0..200) |_| {
         const v = g.generate(prng.random(), std.testing.allocator, 100);
-        seen[@intFromEnum(v)] = true;
+        seen[@backingInt(v)] = true;
     }
     for (seen) |s| try std.testing.expect(s);
 }

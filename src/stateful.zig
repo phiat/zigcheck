@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Gen = @import("gen.zig").Gen;
+const clock = @import("clock.zig");
 const ShrinkIter = @import("shrink.zig").ShrinkIter;
 const auto_mod = @import("auto.zig");
 
@@ -120,7 +121,7 @@ pub fn StateMachine(
         }
 
         fn checkInternal(config: StatefulConfig, callbacks: Callbacks, alloc: std.mem.Allocator) Result {
-            const seed = config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+            const seed = config.seed orelse clock.timeSeed();
             var prng = std.Random.DefaultPrng.init(seed);
             const rng = prng.random();
 
