@@ -111,7 +111,7 @@ test "checkFuzzOne: failing property returns .failed with shrunk value" {
 
 test "checkFuzzOne: passing property returns .passed" {
     const gen = generators.auto(u8);
-    const bytes = [_]u8{ 0x05 };
+    const bytes = [_]u8{0x05};
 
     const result = runner.checkFuzzOne(u8, gen, &bytes, struct {
         fn prop(_: u8) anyerror!void {}
@@ -125,7 +125,7 @@ test "checkFuzzOne: passing property returns .passed" {
 
 test "checkFuzzOne: discarded test cases count as passed" {
     const gen = generators.auto(u8);
-    const bytes = [_]u8{ 0x05 };
+    const bytes = [_]u8{0x05};
 
     const result = runner.checkFuzzOne(u8, gen, &bytes, struct {
         fn prop(_: u8) anyerror!void {
@@ -141,7 +141,7 @@ test "checkFuzzOne: discarded test cases count as passed" {
 
 test "forAllFuzzOne: passing property returns success" {
     const gen = generators.auto(u8);
-    const bytes = [_]u8{ 0x05 };
+    const bytes = [_]u8{0x05};
 
     try runner.forAllFuzzOne(u8, gen, &bytes, struct {
         fn prop(_: u8) anyerror!void {}
@@ -150,7 +150,7 @@ test "forAllFuzzOne: passing property returns success" {
 
 test "forAllFuzzOne: discarded test cases are not failures" {
     const gen = generators.auto(u8);
-    const bytes = [_]u8{ 0x05 };
+    const bytes = [_]u8{0x05};
 
     try runner.forAllFuzzOne(u8, gen, &bytes, struct {
         fn prop(_: u8) anyerror!void {
