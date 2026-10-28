@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Gen = @import("gen.zig").Gen;
+const clock = @import("clock.zig");
 const ShrinkIter = @import("shrink.zig").ShrinkIter;
 const shrink_mod = @import("shrink.zig");
 
@@ -68,9 +69,9 @@ pub fn within(
 ) *const fn (T) anyerror!void {
     return struct {
         fn wrapped(value: T) anyerror!void {
-            var timer = std.time.Timer.start() catch return property(value);
+            const start = clock.monotonicNanos();
             property(value) catch |err| return err;
-            const elapsed = timer.read();
+            const elapsed: u64 = @intCast(clock.monotonicNanos() - start);
             if (elapsed / 1000 > timeout_us) {
                 std.log.err("zigcheck.within: property took {d}us, limit is {d}us", .{ elapsed / 1000, timeout_us });
                 return error.PropertyTimedOut;
@@ -357,7 +358,7 @@ pub fn recheck(
 
 /// Resolve seed from config, using time-based fallback if null.
 fn resolveSeed(config: Config) u64 {
-    return config.seed orelse @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    return config.seed orelse clock.timeSeed();
 }
 
 /// Shared failure reporting. counterexample and original are format-ready tuples.

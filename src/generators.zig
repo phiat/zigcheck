@@ -38,7 +38,7 @@ pub fn int(comptime T: type) Gen(T) {
                         const bound: T = @intCast(@max(1, @as(u128, @intCast(max_val)) / 100 * size));
                         return rng.intRangeAtMost(T, -bound, bound);
                     } else {
-                        const Wide = std.meta.Int(.unsigned, bits);
+                        const Wide = @Int(.unsigned, bits);
                         const bound_wide: Wide = @intCast(@max(1, @as(u128, @intCast(max_val)) * size / 100));
                         const bound: T = @intCast(@min(bound_wide, @as(Wide, @intCast(max_val))));
                         return rng.intRangeAtMost(T, -bound, bound);
@@ -114,7 +114,7 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
                             const bits = @typeInfo(T).int.bits;
                             if (bits >= 128) {
                                 // Use unsigned distance to avoid needing i129.
-                                const Unsigned = std.meta.Int(.unsigned, bits);
+                                const Unsigned = @Int(.unsigned, bits);
                                 const lo_u: Unsigned = @bitCast(self.lo);
                                 const hi_u: Unsigned = @bitCast(self.hi);
                                 // lo <= hi in the value domain, but after bitcast
@@ -123,7 +123,7 @@ pub fn intRange(comptime T: type, comptime min: T, comptime max: T) Gen(T) {
                                 const dist = hi_u -% lo_u;
                                 break :blk @as(T, @bitCast(lo_u +% (dist / 2)));
                             }
-                            const Wide = std.meta.Int(.signed, bits + 1);
+                            const Wide = @Int(.signed, bits + 1);
                             const lo_wide: Wide = self.lo;
                             const hi_wide: Wide = self.hi;
                             const mid_wide = lo_wide + @divTrunc(hi_wide - lo_wide, 2);
@@ -190,7 +190,7 @@ pub fn float(comptime T: type) Gen(T) {
     comptime {
         if (@typeInfo(T) != .float) @compileError("float() requires a float type, got " ++ @typeName(T));
     }
-    const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const Bits = @Int(.unsigned, @bitSizeOf(T));
     return .{
         .genFn = struct {
             fn f(rng: std.Random, _: std.mem.Allocator, size: usize) T {

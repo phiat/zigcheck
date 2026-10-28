@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Gen = @import("gen.zig").Gen;
+const clock = @import("clock.zig");
 const ShrinkIter = @import("shrink.zig").ShrinkIter;
 const shrink = @import("shrink.zig");
 const generators = @import("generators.zig");
@@ -531,7 +532,7 @@ pub fn growingElements(comptime T: type, comptime items: []const T) Gen(T) {
 /// Returns a heap-allocated slice of generated values.
 /// Logs the seed used so results can be reproduced with `sampleWith`.
 pub fn sample(comptime T: type, gen: Gen(T), n: usize, allocator: std.mem.Allocator) ![]T {
-    const seed = @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))));
+    const seed = clock.timeSeed();
     std.log.info("zigcheck.sample: using seed 0x{x} (reproduce with sampleWith(..., 0x{x}, ...))", .{ seed, seed });
     return sampleWith(T, gen, n, seed, allocator);
 }
