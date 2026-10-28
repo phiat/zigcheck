@@ -1,18 +1,33 @@
 # zigcheck
 
 [![Zig](https://img.shields.io/badge/Zig-0.17.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
-[![Tests](https://img.shields.io/badge/tests-184_passing-brightgreen)](#running-tests)
+[![Version](https://img.shields.io/badge/version-0.6.1-orange)](build.zig.zon)
+[![Tests](https://img.shields.io/badge/tests-187_passing-brightgreen)](#development)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.0-orange)](build.zig.zon)
-[![Generators](https://img.shields.io/badge/generators-40%2B-blueviolet)](#generators)
-[![Shrinking](https://img.shields.io/badge/shrinking-automatic-success)](#shrinking)
-[![QuickCheck](https://img.shields.io/badge/QuickCheck_parity-~93%25-informational)](#api)
 
-Property-based testing for Zig, inspired by Haskell's [QuickCheck](https://hackage.haskell.org/package/QuickCheck). Generate random structured inputs, check properties, and automatically shrink failing cases to minimal counterexamples.
+Property-based testing for Zig, inspired by Haskell's [QuickCheck](https://hackage.haskell.org/package/QuickCheck). Generate random structured inputs, check properties, and shrink failing cases to minimal counterexamples. Requires Zig 0.17.0 (use v0.5.5 for 0.15).
+
+## Install
+
+```zig
+// build.zig.zon
+.dependencies = .{
+    .zigcheck = .{
+        .url = "https://github.com/phiat/zigcheck/archive/refs/tags/v0.6.1.tar.gz",
+        // run `zig build` once; the compiler prints the .hash to add
+    },
+},
+```
+
+```zig
+// build.zig
+const zigcheck_mod = b.dependency("zigcheck", .{}).module("zigcheck");
+my_tests.root_module.addImport("zigcheck", zigcheck_mod);
+```
 
 ## Quick start
 
-The #1 property-based testing pattern: **if you encode it, you should be able to decode it back**.
+The first property to reach for: **if you encode it, you can decode it back**.
 
 ```zig
 const std = @import("std");
@@ -31,14 +46,9 @@ test "integers survive format/parse roundtrip" {
 }
 ```
 
-> **Why `struct { fn prop(...) ... }.prop`?** Zig has no anonymous function literals.
-> This pattern — declaring a function inside an anonymous struct and taking its
-> pointer — is the idiomatic workaround. It appears in every zigcheck property.
-> You are not doing it wrong; this is the correct form.
+Zig has no function literals, so every property is `struct { fn prop(...) ... }.prop`. That is the intended form.
 
-This pattern — encode, decode, compare — transfers directly to JSON, protobuf, custom wire formats, anything with a serialization layer.
-
-When a property fails, zigcheck **automatically shrinks** the counterexample to the smallest failing input:
+When a property fails, zigcheck shrinks the input to a minimal counterexample:
 
 ```
 --- zigcheck: FAILED after 12 tests ------------------------
@@ -49,26 +59,9 @@ When a property fails, zigcheck **automatically shrinks** the counterexample to 
 -------------------------------------------------------------
 ```
 
-Specialized generators catch bugs in domain-specific code — here, verifying that every Unicode code point roundtrips through UTF-8:
+### Several arguments
 
-```zig
-test "utf-8 encoding roundtrips all code points" {
-    try zigcheck.forAll(u21, zigcheck.generators.unicodeChar(), struct {
-        fn prop(codepoint: u21) !void {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(codepoint, &buf) catch
-                return error.PropertyFalsified;
-            const decoded = std.unicode.utf8Decode(buf[0..len]) catch
-                return error.PropertyFalsified;
-            if (decoded != codepoint) return error.PropertyFalsified;
-        }
-    }.prop);
-}
-```
-
-## Multi-argument properties
-
-Test properties over multiple independently-generated values with `forAllZip`. Each argument is generated and shrunk independently:
+`forAllZip` generates and shrinks each argument independently (`forAllZipWith` takes a `Config` first):
 
 ```zig
 test "addition is commutative" {
@@ -83,454 +76,181 @@ test "addition is commutative" {
 }
 ```
 
-Works with any number of generators. Use `forAllZipWith` for explicit config:
+### Preconditions
+
+`assume()` discards cases that do not meet a precondition; the run gives up after `max_discard` (default 500):
 
 ```zig
-try zigcheck.forAllZipWith(.{ .num_tests = 500, .seed = 0x1 }, .{
-    zigcheck.generators.int(i32),
-    zigcheck.generators.asciiString(50),
-}, struct {
-    fn prop(n: i32, s: []const u8) !void {
-        _ = n;
-        _ = s;
-    }
-}.prop);
-```
-
-When shrinking, each argument shrinks independently toward its minimal failing value. A failing case `(10000, "hello world")` shrinks to something like `(1, "a")`.
-
-## Struct generators
-
-You have a struct and you need a generator. Use this decision tree:
-
-**1. All fields are primitive or standard types?** Use `auto(T)`.
-
-It derives generators for every field via comptime reflection and shrinks each field independently.
-
-```zig
-const Point = struct { x: i32, y: i32 };
-try zigcheck.forAll(Point, zigcheck.auto(Point), prop);
-```
-
-**2. Some fields need domain-specific generators?** Use `build(T, .{ ... })`.
-
-Provide one generator per field in declaration order. You get per-field shrinking for free. **This is the recommended default for struct generators with any domain constraints.**
-
-```zig
-const DefnSpec = struct {
-    ret_type: []const u8,
-    fn_name:  []const u8,
-    arity:    u8,
-};
-
-fn defnSpecGen() zigcheck.Gen(DefnSpec) {
-    return zigcheck.build(DefnSpec, .{
-        typeGen(),                              // ret_type
-        identGen(),                             // fn_name
-        zigcheck.generators.intRange(u8, 0, 4), // arity
-    });
-}
-```
-
-**3. Fields have cross-field dependencies?** Write a manual generator.
-
-Use `Gen(T).fromGenFn` for a quick generator with no shrinking, or `assume()` in the property to discard invalid combinations:
-
-```zig
-fn pairedRangeGen() zigcheck.Gen(Range) {
-    return zigcheck.Gen(Range).fromGenFn(struct {
-        fn f(rng: std.Random, alloc: std.mem.Allocator, size: usize) Range {
-            const lo = zigcheck.generators.int(i32).generate(rng, alloc, size);
-            const hi = lo +| zigcheck.generators.positive(i32).generate(rng, alloc, size);
-            return .{ .lo = lo, .hi = hi };
-        }
-    }.f);
-}
-```
-
-Note: `fromGenFn` produces no shrink candidates. If shrinking matters, decompose into independent sub-generators and use `build`.
-
-**4. The type should carry its own generator?** Declare `pub const zigcheck_gen` on the type.
-
-`auto(T)` checks for this before deriving. Use sparingly — it couples test infrastructure into production types. Prefer `build` or a standalone generator function for test-only types.
-
-```zig
-const Money = struct {
-    cents: u32,
-    pub const zigcheck_gen = zigcheck.Gen(Money){
-        .genFn = &struct { fn f(rng: std.Random, _: std.mem.Allocator, _: usize) Money {
-            return .{ .cents = rng.intRangeAtMost(u32, 0, 100_00) }; // $0-$100
-        } }.f,
-        .shrinkFn = &struct { fn f(_: Money, _: std.mem.Allocator) @import("zigcheck").ShrinkIter(Money) {
-            return @import("zigcheck").ShrinkIter(Money).empty();
-        } }.f,
-    };
-};
-// zigcheck.auto(Money) uses zigcheck_gen instead of deriving from fields
-```
-
-### Custom string generators
-
-Need strings from a specific character set (e.g. valid identifiers)? Compose `element` with `sliceOfRange`:
-
-```zig
-const ident_chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
-const identGen = comptime zigcheck.sliceOfRange(
-    zigcheck.element(u8, ident_chars), 1, 12,
-);
-// Generates strings of 1-12 chars from ident_chars, with full shrinking
-```
-
-This works because `element(u8, charset)` is a `Gen(u8)` and `sliceOfRange` builds a `Gen([]const u8)` from any `Gen(u8)`. You get slice shrinking (removing chunks) plus element shrinking (toward earlier characters in the charset) for free.
-
-### Pattern: spec-then-build for roundtrip testing
-
-Generate a lightweight spec struct, then derive the actual test input from it. The spec is what zigcheck generates and shrinks; the real input is constructed from it. This produces readable counterexamples — you see spec fields, not raw strings:
-
-```zig
-const DefnSpec = struct { ret_type: []const u8, fn_name: []const u8, arity: u8 };
-
-test "parse-emit roundtrip" {
-    try zigcheck.forAll(DefnSpec, defnSpecGen(), struct {
-        fn prop(spec: DefnSpec) !void {
-            const source = buildSource(spec, std.testing.allocator) orelse return;
-            defer std.testing.allocator.free(source);
-            const output = parseAndEmit(source, std.testing.allocator) orelse
-                return error.PropertyFalsified;
-            defer std.testing.allocator.free(output);
-            // assert on output using spec fields as ground truth
+test "division undoes multiplication" {
+    try zigcheck.forAllZip(.{
+        zigcheck.generators.intRange(i32, -1000, 1000),
+        zigcheck.generators.intRange(i32, -1000, 1000),
+    }, struct {
+        fn prop(a: i32, b: i32) !void {
+            try zigcheck.assume(b != 0);
+            if (@divTrunc(a * b, b) != a) return error.PropertyFalsified;
         }
     }.prop);
 }
 ```
 
-## Installation
+## Generators for your types
 
-Add zigcheck as a Zig package dependency in your `build.zig.zon`:
+1. **Primitive or standard fields**: `auto(T)` derives a generator (and per-field shrinking) for ints, floats, bools, enums, structs, `?T`, `[]const T` and `union(enum)`.
 
-```zig
-.dependencies = .{
-    .zigcheck = .{
-        .url = "https://github.com/phiat/zigcheck/archive/v0.6.0.tar.gz",
-        // .hash = "...",  // zig build will tell you the expected hash
-    },
-},
-```
+   ```zig
+   const Point = struct { x: i32, y: i32 };
+   try zigcheck.forAll(Point, zigcheck.auto(Point), prop);
+   ```
 
-Then in `build.zig`:
+2. **Some fields need constraints**: `build(T, .{ ... })` takes one generator per field in declaration order, with per-field shrinking. This is the default choice for constrained structs.
 
-```zig
-const zigcheck_dep = b.dependency("zigcheck", .{});
-const zigcheck_mod = zigcheck_dep.module("zigcheck");
+   ```zig
+   const Spec = struct { name: []const u8, arity: u8 };
+   const specGen = zigcheck.build(Spec, .{
+       zigcheck.sliceOfRange(zigcheck.element(u8, "abcdefgh_"), 1, 12), // name
+       zigcheck.generators.intRange(u8, 0, 4), // arity
+   });
+   ```
 
-// Add to your test step:
-my_tests.root_module.addImport("zigcheck", zigcheck_mod);
-```
+3. **Fields depend on each other**: write `Gen(T).fromGenFn(fn (rng, alloc, size) T)`, which does not shrink, or generate independent parts and `assume()` the relation. Decomposing into independent generators with `build` keeps shrinking.
 
-## Generators
+4. **The type carries its own generator**: declare `pub const zigcheck_gen: zigcheck.Gen(T)` on it; `auto(T)` uses that instead of deriving. Prefer `build` for test-only types.
 
-### Primitive types
+A readable pattern for round trips: generate a small *spec* struct and build the real input from it, so counterexamples show spec fields rather than raw strings.
 
-| Generator | Type | Description |
-|---|---|---|
-| `generators.int(T)` | `Gen(T)` | Size-scaled integer (small at size 0, full range at max) |
-| `generators.intRange(T, min, max)` | `Gen(T)` | Integer in `[min, max]` |
-| `generators.float(T)` | `Gen(T)` | Size-scaled finite float |
-| `generators.boolean()` | `Gen(bool)` | `true` or `false` |
-| `generators.byte()` | `Gen(u8)` | Single byte (alias for `int(u8)`) |
-| `generators.positive(T)` | `Gen(T)` | Strictly positive integer (`> 0`) |
-| `generators.nonNegative(T)` | `Gen(T)` | Non-negative integer (`>= 0`) |
-| `generators.nonZero(T)` | `Gen(T)` | Non-zero integer (`!= 0`) |
-| `generators.negative(T)` | `Gen(T)` | Strictly negative integer (`< 0`, signed only) |
+## Reference
 
-### Slices and strings
+### Primitives
 
-| Generator | Type | Description |
-|---|---|---|
-| `slice(T, gen, max_len)` | `Gen([]const T)` | Slice of `T` with length in `[0, max_len]` |
-| `sliceRange(T, gen, min, max)` | `Gen([]const T)` | Slice with length in `[min, max]` |
-| `asciiChar()` | `Gen(u8)` | Printable ASCII (32-126) |
-| `asciiString(max_len)` | `Gen([]const u8)` | ASCII string up to `max_len` |
-| `asciiStringRange(min, max)` | `Gen([]const u8)` | ASCII string with length in `[min, max]` |
-| `alphanumeric()` | `Gen(u8)` | `[a-zA-Z0-9]` |
-| `alphanumericString(max_len)` | `Gen([]const u8)` | Alphanumeric string |
-| `string(max_len)` | `Gen([]const u8)` | Raw bytes (any u8) |
-| `unicodeChar()` | `Gen(u21)` | Random Unicode code point (excludes surrogates) |
-| `unicodeString(max_cps)` | `Gen([]const u8)` | Valid UTF-8 string up to `max_cps` code points |
+| Generator | Produces |
+|---|---|
+| `generators.int(T)` | Size-scaled integer (small at size 0, full range at max) |
+| `generators.intRange(T, min, max)` | Integer in `[min, max]` |
+| `generators.float(T)` | Size-scaled finite float |
+| `generators.boolean()` / `generators.byte()` | `bool` / `u8` |
+| `generators.positive(T)` / `nonNegative(T)` / `nonZero(T)` / `negative(T)` | Integers with that sign constraint |
 
-Slice shrinking removes chunks (halves, quarters, eighths, ..., single elements), then shrinks individual elements. The runner uses an internal arena for generated values, so no special allocator setup is needed.
+### Strings and slices
 
-> **`slice` vs `sliceOf`:** `slice(T, gen, max)` and `sliceRange(T, gen, min, max)` require an explicit element type. `sliceOf(gen, max)` and `sliceOfRange(gen, min, max)` infer it from the generator. Prefer `sliceOf`/`sliceOfRange` — they're shorter and less error-prone.
+| Generator | Produces |
+|---|---|
+| `asciiChar()` / `asciiString(max)` / `asciiStringRange(min, max)` | Printable ASCII (32-126) |
+| `alphanumeric()` / `alphanumericString(max)` | `[a-zA-Z0-9]` |
+| `string(max)` | Raw bytes |
+| `unicodeChar()` / `unicodeString(max_cps)` | Code point (no surrogates) / valid UTF-8 |
+| `sliceOf(gen, max)` / `sliceOfRange(gen, min, max)` | Slice of anything `gen` makes; element type inferred |
+| `slice(T, gen, max)` / `sliceRange(T, gen, min, max)` | Same with an explicit element type |
+| `arrayOf(T, gen, N)` | `[N]T` with per-element shrinking |
+| `shuffle(T, items)` / `sublistOf(T, items)` | Permutation / subsequence of a fixed list |
+| `orderedList(T, gen, max)` | Sorted slice |
+| `growingElements(T, items)` | Element, biased toward earlier ones |
 
-**Tip:** Use `sliceOfRange(gen, 1, max)` when your property needs at least one element — `sliceOf(gen, max)` can shrink to empty, which may cause `for (1..s.len)` to overflow.
-
-```zig
-try zigcheck.forAll([]const u8, zigcheck.asciiString(50), struct {
-    fn prop(s: []const u8) !void {
-        // test your parser, serializer, etc.
-        _ = s;
-    }
-}.prop);
-```
-
-### Derived types
-
-| Generator | Type | Description |
-|---|---|---|
-| `auto(T)` | `Gen(T)` | Auto-derive from `int`, `float`, `bool`, `enum`, `struct`, `?T`, `[]const T`, `union(enum)`. See [Struct generators](#struct-generators) for the full decision tree. |
-| `Gen(T).fromGenFn(fn)` | `Gen(T)` | Construct a generator from just a generation function, with no shrinking. |
+`sliceOf(gen, max)` can shrink to empty; use `sliceOfRange(gen, 1, max)` when the property needs an element.
 
 ### Combinators
 
-| Combinator | Signature | Description |
-|---|---|---|
-| `constant(T, value)` | `Gen(T)` | Always produces `value` |
-| `element(T, choices)` | `Gen(T)` | Picks from a fixed list |
-| `oneOf(T, gens)` | `Gen(T)` | Picks from multiple generators |
-| `frequency(T, weighted)` | `Gen(T)` | Weighted choice from `{weight, gen}` pairs |
-| `map(A, B, gen, fn)` | `Gen(B)` | Transform output type (no shrinking; use `shrinkMap`) |
-| `mapAlloc(A, B, gen, fn)` | `Gen(B)` | Like `map` but `fn` receives the arena allocator |
-| `filter(T, gen, pred)` | `Gen(T)` | Retry up to 1000 times; logs warning if exhausted. Prefer `assume()` for restrictive predicates. |
-| `flatMap(A, B, gen, fn)` | `Gen(B)` | Monadic bind for dependent generation (no shrinking) |
-| `noShrink(T, gen)` | `Gen(T)` | Disable shrinking for a generator |
-| `shrinkMap(A, B, gen, fwd, bwd)` | `Gen(B)` | Shrink via isomorphism |
-| `shrinkMapAlloc(A, B, gen, fwd, bwd)` | `Gen(B)` | Like `shrinkMap` but `fwd`/`bwd` receive the arena allocator |
-| `sized(T, factory)` | `Gen(T)` | Generator from size-dependent factory function |
-| `resize(T, gen, size)` | `Gen(T)` | Override size parameter to a fixed value |
-| `scale(T, gen, pct)` | `Gen(T)` | Scale size parameter by percentage |
-| `mapSize(T, gen, fn)` | `Gen(T)` | Transform size parameter with a function |
-| `suchThatMap(A, B, gen, fn)` | `Gen(B)` | Filter and transform in one step |
-| `funGen(A, B, gen_b)` | `Gen(FunWith(A,B,gen_b))` | Generate random pure functions (QuickCheck `Fun`) |
-| `build(T, gens)` | `Gen(T)` | **Recommended for structs.** Per-field generators with independent shrinking. See [Struct generators](#struct-generators). |
-| `zip(gens)` | `Gen(Tuple)` | Combine generators into a tuple `Gen(struct { A, B, ... })` |
-| `arrayOf(T, gen, N)` | `Gen([N]T)` | Fixed-size array with per-element shrinking |
-| `zipMap(gens, R, fn)` | `Gen(R)` | Zip generators + map with splatted args |
-| `sliceOf(gen, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `slice`) |
-| `sliceOfRange(gen, min, max)` | `Gen([]const T)` | Infers element type from generator (preferred over `sliceRange`) |
-| `GenType(gen)` | `type` | Extract the value type `T` from a `Gen(T)` |
+| Combinator | Description |
+|---|---|
+| `constant(T, v)`, `element(T, choices)` | Always `v`; pick from a list |
+| `oneOf(T, gens)`, `frequency(T, weighted)` | Pick a generator; weighted pick from `{weight, gen}` pairs |
+| `map(A, B, gen, fn)`, `mapAlloc` | Transform output (no shrinking); `mapAlloc` gives `fn` the arena allocator |
+| `shrinkMap(A, B, gen, fwd, bwd)`, `shrinkMapAlloc` | Transform and keep shrinking through an isomorphism |
+| `filter(T, gen, pred)` | Retry up to 1000 times, then warn; prefer `assume()` for restrictive predicates |
+| `suchThatMap(A, B, gen, fn)` | Filter and transform; `fn` returns `null` to discard |
+| `flatMap(A, B, gen, fn)` | Dependent generation (no shrinking) |
+| `build(T, gens)` | Struct from per-field generators |
+| `zip(gens)`, `zipMap(gens, R, fn)` | Tuple of generators; zip and map with splatted arguments |
+| `noShrink(T, gen)` | Disable shrinking |
+| `sized(T, factory)`, `resize(T, gen, n)`, `scale(T, gen, pct)`, `mapSize(T, gen, fn)` | Control the size parameter |
+| `funGen(A, B, gen_b)` | Random pure functions (QuickCheck `Fun`) |
+| `GenType(gen)` | The `T` of a `Gen(T)` |
 
 ```zig
-// Only test with positive even numbers
-const pos_even = comptime zigcheck.filter(i32, zigcheck.generators.int(i32), struct {
-    fn pred(n: i32) bool {
-        return n > 0 and @mod(n, 2) == 0;
-    }
-}.pred);
-
 // Weighted choice: 90% small, 10% large
 const weighted = comptime zigcheck.frequency(u32, &.{
     .{ 9, zigcheck.generators.intRange(u32, 0, 10) },
     .{ 1, zigcheck.generators.intRange(u32, 1000, 10000) },
 });
+
+// Dependent generation: the first value picks the generator for the second
+const dependent = comptime zigcheck.flatMap(bool, u32, zigcheck.generators.boolean(), struct {
+    fn f(small: bool) zigcheck.Gen(u32) {
+        return if (small)
+            zigcheck.generators.intRange(u32, 0, 10)
+        else
+            zigcheck.generators.intRange(u32, 1000, 10000);
+    }
+}.f);
 ```
 
-### Composed combinator examples
+### Shrinking
 
-Combinators compose — chain `map`, `filter`, `shrinkMap`, and `flatMap` to build domain-specific generators from primitives.
-
-**map + filter: domain-constrained types**
-
-```zig
-// Generate valid HTTP port numbers (1024-65535), mapped to a Port struct
-const Port = struct { value: u16 };
-const portGen = comptime zigcheck.map(
-    u16, Port,
-    zigcheck.filter(u16, zigcheck.generators.int(u16), struct {
-        fn pred(n: u16) bool { return n >= 1024; }
-    }.pred),
-    struct { fn f(n: u16) Port { return .{ .value = n }; } }.f,
-);
-```
-
-**shrinkMap: isomorphic domain types with shrinking**
-
-```zig
-// Generate timestamps as u64, shrink in integer space, convert both ways
-const Timestamp = struct { epoch_ms: u64 };
-const timestampGen = comptime zigcheck.shrinkMap(
-    u64, Timestamp,
-    zigcheck.generators.intRange(u64, 0, 4_102_444_800_000), // up to 2100
-    struct { fn fwd(ms: u64) Timestamp { return .{ .epoch_ms = ms }; } }.fwd,
-    struct { fn bwd(ts: Timestamp) u64 { return ts.epoch_ms; } }.bwd,
-);
-```
-
-**flatMap: dependent generation**
-
-```zig
-// Generate a length, then a string of exactly that length
-const exactLenString = comptime zigcheck.flatMap(
-    u8, []const u8,
-    zigcheck.generators.intRange(u8, 1, 20),
-    struct {
-        fn f(len: u8) zigcheck.Gen([]const u8) {
-            return zigcheck.sliceOfRange(zigcheck.generators.alphanumeric(), len, len);
-        }
-    }.f,
-);
-```
-
-**suchThatMap: filter + transform in one step**
-
-```zig
-// Generate non-empty strings and return their first character
-const firstChar = comptime zigcheck.suchThatMap(
-    []const u8, u8,
-    zigcheck.generators.asciiString(50),
-    struct {
-        fn f(s: []const u8) ?u8 {
-            return if (s.len > 0) s[0] else null; // null = discard
-        }
-    }.f,
-);
-```
-
-### Collection generators
-
-| Generator | Signature | Description |
-|---|---|---|
-| `shuffle(T, items)` | `Gen([]const T)` | Random permutation of a fixed list |
-| `sublistOf(T, items)` | `Gen([]const T)` | Random subsequence of a fixed list |
-| `orderedList(T, gen, max)` | `Gen([]const T)` | Sorted slice of random values |
-| `growingElements(T, items)` | `Gen(T)` | Biased toward earlier elements |
-
-## Shrinking
-
-Every generator comes with a built-in shrinker that converges toward a minimal counterexample:
+Every generator ships a shrinker; `.verbose_shrink = true` prints each step.
 
 | Type | Strategy |
 |---|---|
-| Integer | Binary search toward zero; try sign flip for negatives |
-| `intRange` | Binary search toward `min`, clamped to `[min, max]` |
-| Bool | `true` shrinks to `false` |
-| Float | Yield `0.0`, then halve toward zero (handles NaN/Inf) |
-| Enum | Yield variants with lower declaration index |
-| Struct | Shrink each field independently |
+| Integer | Binary search toward zero (`intRange`: toward `min`); sign flip for negatives |
+| Bool, enum | `true` to `false`; variants with a lower declaration index |
+| Float | `0.0`, then halve toward zero (handles NaN and Inf) |
+| Struct, union | Each field or payload independently; unions also try earlier variants |
 | Slice | Remove chunks (halves, quarters, ..., single elements), then shrink elements |
-| `element` | Shrink toward earlier elements in the list |
-| `filter` | Inner shrinker, filtered by predicate |
+| `element`, `filter` | Toward earlier elements; inner shrinker filtered by the predicate |
 
-The runner uses an arena allocator for shrink state, freed in bulk when shrinking completes. Enable `.verbose_shrink = true` to see each shrink step.
+### Size
 
-## Implication / preconditions
+Like QuickCheck, a `size` parameter ramps from 0 to `max_size` (default 100) across the run, so early cases are small and later ones large. `int`, `float` and the slice and string generators scale with it; `intRange`, `boolean`, `element` and enums do not.
 
-Use `assume()` to discard test cases that don't meet preconditions. The runner tracks discards and gives up if too many are discarded (default: 500):
-
-```zig
-test "division is inverse of multiplication" {
-    try zigcheck.forAllZip(.{
-        zigcheck.generators.int(i32),
-        zigcheck.generators.int(i32),
-    }, struct {
-        fn prop(a: i32, b: i32) !void {
-            try zigcheck.assume(b != 0); // discard when b is zero
-            const result = @divTrunc(a *% b, b);
-            if (result != a) return error.PropertyFalsified;
-        }
-    }.prop);
-}
-```
-
-## Coverage / labeling
-
-Track the distribution of generated test cases with `forAllLabeled`:
-
-```zig
-try zigcheck.forAllLabeled(i32, zigcheck.generators.int(i32),
-    struct {
-        fn prop(n: i32) !void {
-            if (n == 0) return error.PropertyFalsified;
-        }
-    }.prop,
-    struct {
-        fn classify(n: i32) []const []const u8 {
-            if (n > 0) return &.{"positive"};
-            if (n < 0) return &.{"negative"};
-            return &.{"zero"};
-        }
-    }.classify,
-);
-// Prints: 50.2% positive, 49.7% negative, 0.1% zero
-```
-
-Coverage requirements (`forAllCover` and `PropertyContext.cover`) use **Wilson score confidence intervals** to avoid spurious failures. A label only fails when the upper bound of the confidence interval is below the required percentage, meaning the library is statistically confident the true proportion is insufficient. The confidence level defaults to 0.95 and can be set via `Config.confidence`.
-
-## Configuration
+### Configuration
 
 ```zig
 try zigcheck.forAllWith(.{
-    .num_tests = 500,         // default: 100
-    .max_shrinks = 2000,      // default: 1000
-    .max_discard = 1000,      // default: 500
-    .seed = 0x2a,             // default: null (time-based)
-    .verbose = true,          // default: false
-    .verbose_shrink = true,   // default: false
-    .max_size = 200,          // default: 100
-    .confidence = 0.99,       // default: 0.95
+    .num_tests = 500,       // default 100
+    .max_shrinks = 2000,    // default 1000
+    .max_discard = 1000,    // default 500
+    .seed = 0x2a,           // default null (time-based); failures print theirs
+    .verbose = true,        // print every case
+    .verbose_shrink = true, // print every shrink step
+    .max_size = 200,        // default 100
+    .confidence = 0.99,     // coverage checks, default 0.95
 }, i32, gen, property);
+
+const cfg = (zigcheck.Config{}).withNumTests(500).withMaxShrinks(2000).withSeed(0x2a);
 ```
 
-Use `.seed` for deterministic, reproducible test runs. Failed tests print their seed so you can replay them. The runner uses an internal arena for generated values, so no special allocator setup is needed for slice/string generators. Use `.max_discard` to control how many test cases can be discarded via `assume()` before giving up. Use `.confidence` to set the confidence level for coverage checks (see below).
+The runner keeps generated values in an internal arena, so slice and string generators need no allocator setup. A property that allocates should use `std.testing.allocator`.
 
-Config supports builder methods for per-property overrides (QuickCheck's `withMaxSuccess`, `withMaxShrinks`, etc.):
+### Running properties
+
+| Function | Description |
+|---|---|
+| `forAll(T, gen, prop)`, `forAllWith(cfg, ...)` | Check a property |
+| `forAllZip(gens, prop)`, `forAllZipWith(cfg, ...)` | N-argument property |
+| `check(cfg, T, gen, prop)`, `recheck(T, gen, prop, result)` | Return a `CheckResult`; replay a failure |
+| `expectFailure(T, gen, prop)` | Pass only if the property fails |
+| `conjoin(cfg, T, gen, props)`, `disjoin(...)` | All hold; at least one holds |
+| `within(T, timeout_us, prop)` | Fail if the property is slower than the limit |
+| `assume(cond)`, `assertEqual(T, a, b)`, `counterexample(fmt, args)` | Property helpers |
+| `sample(T, gen, n, alloc)`, `sampleWith(..., seed, ...)` | Return `n` generated values, for inspecting a generator |
+
+### Coverage and labels
 
 ```zig
-const cfg = (Config{}).withNumTests(500).withMaxShrinks(2000).withSeed(0x2a);
-try zigcheck.forAllWith(cfg, i32, gen, property);
+try zigcheck.forAllLabeled(i32, zigcheck.generators.int(i32), prop, struct {
+    fn classify(n: i32) []const []const u8 {
+        if (n > 0) return &.{"positive"};
+        if (n < 0) return &.{"negative"};
+        return &.{"zero"};
+    }
+}.classify);
+// Prints: 50.2% positive, 49.7% negative, 0.1% zero
 ```
 
-Properties that need to allocate working memory should use `std.testing.allocator` directly. The runner's internal arena is for generated values only and is not exposed to property functions.
-
-## Size parameter
-
-Like QuickCheck, zigcheck threads a `size` parameter (0 to `max_size`, default 100) linearly across test cases. Early tests use small values, later tests use large ones. This helps find both small-value edge cases and large-value stress bugs in a single run.
-
-All generators respect size:
-- **int(T)** and **float(T)** scale their range — at size 0 they produce `0`, at max size they produce full-range values
-- **Slice/string generators** scale their maximum length — at size 0 they generate minimum-length values, at max size they generate up to the configured maximum
-- **intRange**, **boolean**, **element**, **enum** ignore size (their range is already constrained)
-
-Use `resize(T, gen, n)` to pin a generator to a fixed size, `scale(T, gen, pct)` to multiply the size by a percentage, or `sized(T, factory)` to build a generator whose behavior depends on the current size. Set `max_size` in Config to change the upper bound.
-
-## API
-
-### Core
-
-| Function | Description |
-|---|---|
-| `forAll(T, gen, property)` | Run property check with default config |
-| `forAllWith(config, T, gen, property)` | Run with explicit config |
-| `forAllZip(gens, property)` | N-argument property with splatted args |
-| `forAllZipWith(config, gens, property)` | N-argument property with explicit config |
-| `check(config, T, gen, property)` | Return `CheckResult` without failing |
-| `recheck(T, gen, property, result)` | Replay a failed `CheckResult` (QuickCheck `recheck`) |
-| `fromFuzzInput(T, gen, bytes, allocator)` | Generate one structured value from fuzz bytes |
-| `checkFuzzOne(T, gen, bytes, property)` | Fuzz one-shot check, returns `FuzzCheckResult` (no logging) |
-| `forAllFuzzOne(T, gen, bytes, property)` | Fuzz one-shot check with logging (use inside `std.testing.fuzz`) |
-
-### Property helpers
-
-| Function | Description |
-|---|---|
-| `assume(condition)` | Discard test case if condition is false |
-| `assertEqual(T, expected, actual)` | Assert equality with diagnostic output |
-| `counterexample(fmt, args)` | Log context before a property failure |
-| `expectFailure(T, gen, property)` | Pass only if the property fails |
-| `forAllLabeled(T, gen, property, classifier)` | Collect coverage statistics |
-| `forAllLabeledWith(config, T, gen, property, classifier)` | Labeled check with explicit config |
-| `checkLabeled(config, T, gen, property, classifier, alloc)` | Return `CheckResultLabeled` without failing |
-| `forAllCover(config, T, gen, prop, classifier, reqs)` | Labeled check with minimum coverage requirements (Wilson score) |
-| `forAllCollect(config, T, gen, property)` | Auto-label with stringified value (QuickCheck `collect`) |
-| `forAllTabulate(config, T, gen, prop, table, classifier)` | Group labels under a named table (QuickCheck `tabulate`) |
-| `conjoin(config, T, gen, properties)` | All properties must hold (`.&&.`) |
-| `disjoin(config, T, gen, properties)` | At least one must hold (`.||.`) |
-| `within(T, timeout_us, property)` | Fail if property takes longer than limit (QuickCheck `within`) |
-| `forAllCtx(T, gen, property)` | Property with `PropertyContext` for composable classify/cover/label |
-| `forAllCtxWith(config, T, gen, property)` | Context property with explicit config |
+`forAllCover` adds minimum percentages per label, checked with Wilson score confidence intervals: a label fails only when the interval's upper bound is below the requirement. Also: `forAllLabeledWith`, `checkLabeled`, `forAllCollect` (label by value), `forAllTabulate` (named tables), and `forAllCtx` / `forAllCtxWith` with a `PropertyContext` for composable classify, cover and label.
 
 ### Stateful testing
 
-Test stateful APIs by generating random command sequences and verifying model invariants (QuickCheck's `Test.QuickCheck.Monadic` / Erlang QuickCheck's `eqc_statem`):
+Generate random command sequences against a model (QuickCheck's `Monadic`, Erlang's `eqc_statem`):
 
 ```zig
 const Command = union(enum) { push: i32, pop };
@@ -545,74 +265,40 @@ try Spec.runWith(.{ .num_tests = 100, .max_commands = 30 }, .{
     .run_command = runCmd,
     .next_model = nextModel,
     .postcondition = postCond,
+    // .cleanup_sut = freeStack,  // for sockets, arenas, file handles
 });
 ```
 
-If your SUT holds resources (sockets, arenas, file handles), pass `.cleanup_sut = myCleanupFn` to free them after each test sequence.
+Failing sequences shrink in two phases: remove chunks of commands, then shrink command payloads (`push(1000)` to `push(0)`).
 
-Failing sequences are automatically shrunk in two phases: first by removing chunks of commands (same strategy as slice shrinking), then by shrinking individual command payloads (e.g., `push(1000)` shrinks to `push(0)`). This produces truly minimal counterexamples.
+## zigcheck and fuzzing
 
-### Utility
-
-| Function | Description |
-|---|---|
-| `sample(T, gen, n, allocator)` | Generate N sample values for debugging |
-| `sampleWith(T, gen, n, seed, allocator)` | Sample with specific seed |
-
-## Running tests
-
-```bash
-zig build test
-```
-
-## zigcheck vs Zig's built-in fuzz testing
-
-Zig has built-in [coverage-guided fuzz testing](https://ziglang.org/documentation/master/std/#std.testing.fuzz) (`std.testing.fuzz`). It feeds raw bytes to a function and uses code coverage to steer toward unexplored paths. zigcheck is a different tool for a different job:
-
-| | Fuzz testing | zigcheck |
-|---|---|---|
-| **Input** | Raw bytes — you parse them | Typed, structured values via generators |
-| **Question** | "Does this crash on malformed input?" | "Does this satisfy my invariant on valid input?" |
-| **Duration** | Runs indefinitely, gets smarter over time | 100 tests in milliseconds, deterministic |
-| **On failure** | Gives you the crashing input | Shrinks to the *minimal* counterexample |
-| **Sweet spot** | Robustness — crashes, panics, memory errors | Correctness — logic bugs, broken invariants, spec violations |
-
-Consider an encoder/decoder. Both tools test it, but they ask different questions:
+`std.testing.fuzz` feeds raw bytes to a function and uses coverage to find crashes. zigcheck checks invariants on typed, structured inputs and shrinks failures. They answer different questions, so use both:
 
 ```zig
-// zigcheck: does encode→decode preserve the value? (logical correctness)
+// zigcheck: does encode then decode preserve the value?
 test "roundtrip preserves data" {
     try zigcheck.forAll(User, zigcheck.auto(User), struct {
         fn prop(user: User) !void {
-            const bytes = try encode(user);
-            const decoded = try decode(bytes);
+            const decoded = try decode(try encode(user));
             try std.testing.expectEqual(user.id, decoded.id);
         }
     }.prop);
 }
-
-// fuzz: does decode survive arbitrary bytes? (robustness)
-test "decoder doesn't crash" {
-    try std.testing.fuzz({}, struct {
-        fn f(_: anytype, bytes: []const u8) !void { _ = decode(bytes); }
-    }.f, .{});
-}
 ```
 
-zigcheck catches "your encoder drops the `email` field." Fuzz testing catches "your decoder panics on a truncated header." **Use both.**
-
-### Hybrid mode: coverage-guided property testing
-
-zigcheck can use `std.testing.fuzz` as a byte source while keeping structured generation and shrinking. The fuzzer's coverage feedback guides *which* inputs are generated; zigcheck's shrinker handles *minimization*:
+**Hybrid mode.** Use the fuzzer as the byte source for structured generation. `forAllFuzzOne` builds a value from the bytes (zeros once exhausted), tests the property, and shrinks on failure; `checkFuzzOne` returns a `FuzzCheckResult` without logging.
 
 ```zig
 test "roundtrip is coverage-guided" {
     try std.testing.fuzz({}, struct {
-        fn f(_: anytype, bytes: []const u8) !void {
+        fn f(_: void, smith: *std.testing.Smith) !void {
+            // The corpus entry as written, or bytes from the fuzzer.
+            var buf: [1024]u8 = undefined;
+            const bytes = if (smith.in) |in| in else buf[0..smith.slice(&buf)];
             try zigcheck.forAllFuzzOne(User, zigcheck.auto(User), bytes, struct {
                 fn prop(u: User) !void {
-                    const encoded = try encode(u);
-                    try std.testing.expectEqual(u.id, (try decode(encoded)).id);
+                    try std.testing.expectEqual(u.id, (try decode(try encode(u))).id);
                 }
             }.prop);
         }
@@ -620,41 +306,19 @@ test "roundtrip is coverage-guided" {
 }
 ```
 
-`forAllFuzzOne` generates a typed value from the fuzz bytes via `FuzzRandom` (zeros when bytes are exhausted), tests the property, and on failure runs `doShrink` to produce a minimal counterexample. Use `checkFuzzOne` for the non-logging variant that returns a `FuzzCheckResult`.
-
-## Project structure
-
-```
-src/
-  zigcheck.zig        # Public API re-exports
-  gen.zig            # Gen(T) core type + fromGenFn
-  generators.zig     # Primitive generators (int, float, bool) + re-exports
-  combinators.zig    # Combinators (constant, element, oneOf, map, filter, etc.)
-  collections.zig    # Slice, string, unicode, shuffle, sublist, ordered list
-  auto.zig           # Auto-derivation (enum, struct, optional, union)
-  shrink.zig         # ShrinkIter(T), shrink state types, chainIters helper
-  runner.zig         # forAll/check engine with shrink loop
-  fuzz.zig           # Fuzz integration (FuzzRandom adapter, fromFuzzInput)
-  stateful.zig       # State machine testing (commands, model, postconditions)
-```
-
 ## Development
 
-Common tasks via [just](https://github.com/casey/just):
-
 ```bash
-just test           # run all tests
-just test-verbose   # run with verbose output
-just test-filter "shrink"  # run tests matching a filter
-just fmt            # format source files
-just stats          # show project stats
-just push           # push to all remotes
-just clean          # clean build artifacts
+zig build test            # or: just test
+just test-filter "shrink" # tests matching a name
+just fmt-check            # zig fmt --check src/
+just fmt                  # zig fmt src/
+just release "0.6.1" "notes"   # annotated tag, push, GitHub release
 ```
 
-## Built with
+Source layout: `zigcheck.zig` (public API), `gen.zig` (`Gen(T)`), `generators.zig` (primitives), `combinators.zig`, `collections.zig` (slices, strings, lists), `auto.zig` (derivation), `shrink.zig`, `runner.zig` (`forAll` and the shrink loop), `fuzz.zig`, `stateful.zig`, `clock.zig` (time-based seed and `within`).
 
-Project management powered by [beads](https://github.com/steveyegge/beads) -- git-backed issue tracking for AI-assisted development.
+Issue tracking uses [beads](https://github.com/steveyegge/beads).
 
 ## License
 
