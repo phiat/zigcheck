@@ -367,9 +367,9 @@ fn logFailure(num_tests: usize, comptime ce_fmt: []const u8, ce_args: anytype, c
         \\
         \\--- zigcheck: FAILED after {d} tests ------------------------
         \\
-        ++ "\\  Counterexample: " ++ ce_fmt ++
+    ++ "\\  Counterexample: " ++ ce_fmt ++
         \\
-        ++ "\\  Shrunk ({d} steps) from: " ++ orig_fmt ++
+    ++ "\\  Shrunk ({d} steps) from: " ++ orig_fmt ++
         \\
         \\  Reproduction seed: 0x{x}
         \\  Rerun with: .seed = 0x{x}
