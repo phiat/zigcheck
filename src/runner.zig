@@ -307,7 +307,10 @@ pub fn checkFuzzOne(
 /// ```zig
 /// test "roundtrip fuzz" {
 ///     try std.testing.fuzz({}, struct {
-///         fn f(_: anytype, bytes: []const u8) !void {
+///         fn f(_: void, smith: *std.testing.Smith) !void {
+///             // The corpus entry as written, or bytes from the fuzzer.
+///             var buf: [1024]u8 = undefined;
+///             const bytes = if (smith.in) |in| in else buf[0..smith.slice(&buf)];
 ///             try zigcheck.forAllFuzzOne(User, zigcheck.auto(User), bytes, struct {
 ///                 fn prop(u: User) !void {
 ///                     try std.testing.expectEqual(u, decode(encode(u)));
@@ -354,6 +357,15 @@ pub fn recheck(
         },
         else => {}, // nothing to replay if it didn't fail
     }
+}
+
+/// Size for the next test case. It ramps from 0 to `max_size` across the run,
+/// and every ten discards add a step (as in QuickCheck): generators such as
+/// `int` produce only 0 at size 0, so a precondition like `assume(b != 0)`
+/// would otherwise discard every case until the run gives up.
+fn computeSize(config: Config, tests_run: usize, discards: usize) usize {
+    if (config.num_tests == 0) return config.max_size;
+    return @min(tests_run * config.max_size / config.num_tests + discards / 10, config.max_size);
 }
 
 /// Resolve seed from config, using time-based fallback if null.
@@ -436,7 +448,7 @@ pub fn check(
         // allocations (slices, strings) are no longer needed.
         _ = gen_arena.reset(.retain_capacity);
 
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const size = computeSize(config, tests_run, discards);
         const value = gen.generate(rng, gen_alloc, size);
 
         // Test the property
@@ -669,7 +681,7 @@ pub fn checkLabeled(
         }
 
         _ = gen_arena.reset(.retain_capacity);
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const size = computeSize(config, tests_run, discards);
         const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
@@ -897,7 +909,7 @@ pub fn forAllCollect(
             return error.GaveUp;
         }
         _ = gen_arena.reset(.retain_capacity);
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const size = computeSize(config, tests_run, discards);
         const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
@@ -974,7 +986,7 @@ pub fn forAllTabulate(
             return error.GaveUp;
         }
         _ = gen_arena.reset(.retain_capacity);
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const size = computeSize(config, tests_run, discards);
         const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value)) |_| {
@@ -1187,7 +1199,7 @@ pub fn forAllCtxWith(
         }
 
         _ = gen_arena.reset(.retain_capacity);
-        const size = if (config.num_tests > 0) tests_run * config.max_size / config.num_tests else config.max_size;
+        const size = computeSize(config, tests_run, discards);
         const value = gen.generate(rng, gen_alloc, size);
 
         if (property(value, &ctx)) |_| {
@@ -1478,6 +1490,20 @@ test "check: discards with assume don't count as tests" {
     }.prop);
     switch (result) {
         .passed => |p| try std.testing.expectEqual(@as(usize, 50), p.num_tests),
+        .failed => return error.TestUnexpectedResult,
+        .gave_up => return error.TestUnexpectedResult,
+    }
+}
+
+test "check: assume on a value that is 0 at size 0 does not discard forever" {
+    // int(i32) is always 0 at size 0; discards must still move the size up.
+    const result = check(.{ .seed = 42, .num_tests = 100 }, i32, generators.int(i32), struct {
+        fn prop(n: i32) !void {
+            try assume(n != 0);
+        }
+    }.prop);
+    switch (result) {
+        .passed => |p| try std.testing.expectEqual(@as(usize, 100), p.num_tests),
         .failed => return error.TestUnexpectedResult,
         .gave_up => return error.TestUnexpectedResult,
     }

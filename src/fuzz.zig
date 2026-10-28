@@ -4,16 +4,22 @@
 // std.Random interface. Generators consume it exactly as they consume a
 // PRNG, but the bytes are chosen by coverage feedback instead of a seed.
 // When the slice is exhausted, zeros are returned -- producing degenerate
-// but valid values without crashing.
+// but valid values without crashing. An endless run of zeros would hang
+// rejection sampling (`uintLessThan` with a bound that is not a power of two),
+// so after `zero_budget` bytes a fixed-seed PRNG takes over.
 
 const std = @import("std");
 const Gen = @import("gen.zig").Gen;
 
+/// Zero bytes served past the end of the input; far more than any one value needs.
+const zero_budget = 1 << 16;
+
 /// A std.Random backed by a fixed byte slice instead of a PRNG.
-/// Drains bytes sequentially; returns zeros when exhausted.
+/// Drains bytes sequentially; returns zeros when exhausted (see `zero_budget`).
 const FuzzRandom = struct {
     bytes: []const u8,
     pos: usize,
+    tail: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
 
     pub fn random(self: *FuzzRandom) std.Random {
         return std.Random.init(self, fill);
@@ -21,10 +27,13 @@ const FuzzRandom = struct {
 
     fn fill(self: *FuzzRandom, buf: []u8) void {
         for (buf) |*byte| {
-            byte.* = if (self.pos < self.bytes.len) blk: {
-                defer self.pos += 1;
-                break :blk self.bytes[self.pos];
-            } else 0;
+            byte.* = if (self.pos < self.bytes.len)
+                self.bytes[self.pos]
+            else if (self.pos - self.bytes.len < zero_budget)
+                0
+            else
+                self.tail.random().int(u8);
+            self.pos += 1;
         }
     }
 };
@@ -72,6 +81,17 @@ test "FuzzRandom: empty bytes gives all zeros" {
     var buf: [4]u8 = undefined;
     rng.bytes(&buf);
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, &buf);
+}
+
+test "FuzzRandom: bounded ranges terminate on exhausted input" {
+    // `uintLessThan` rejection-samples; an endless run of zeros never leaves the loop
+    // for a bound that is not a power of two (a slice length, say).
+    var fuzz_rng = FuzzRandom{ .bytes = &[_]u8{}, .pos = 0 };
+    try testing.expect(fuzz_rng.random().uintLessThan(usize, 7) < 7);
+
+    const gen = generators.auto([]const u8);
+    const value = fromFuzzInput([]const u8, gen, &[_]u8{}, testing.allocator);
+    defer testing.allocator.free(value);
 }
 
 test "fromFuzzInput: deterministic — same bytes produce same value" {
